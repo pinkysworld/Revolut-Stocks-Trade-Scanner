@@ -2726,13 +2726,19 @@ def _earnings_warning(r):
 def _header(text):
     return f"{C.BOLD}{C.CYAN}{text}{C.RESET}"
 
+
+def _section_header(title: str) -> str:
+    """Return a styled console section header with Unicode rules."""
+    bar = "─" * 135
+    if NO_COLOR:
+        return f"\n{bar}\n  {title}\n{bar}"
+    return f"\n{C.CYAN}{bar}{C.RESET}\n{C.BOLD}{C.CYAN}  {title}{C.RESET}\n{C.CYAN}{bar}{C.RESET}"
+
+
 def print_recommendations(recs, robust, weak):
-    BAR = "="*135
     robust_display = sorted(cls for cls in robust if not cls.startswith("crypto_"))
     weak_display = sorted(cls for cls in weak if not cls.startswith("crypto_"))
-    print("\n" + BAR)
-    print(_header(" CONCRETE TRADING RECOMMENDATIONS — 2-week net ROI (mixed asset classes, excl. crypto)"))
-    print(BAR)
+    print(_section_header("CONCRETE TRADING RECOMMENDATIONS — 2-week net ROI (mixed asset classes, excl. crypto)"))
     print(f"\n  Filter applied:")
     print(f"   1. Asset class must have OOS verdict = ROBUST"
           f"{' or WEAK' if ALLOW_WEAK_CLASSES else ''}")
@@ -2770,10 +2776,7 @@ def print_recommendations(recs, robust, weak):
         print(_earnings_warning(r), end="")
 
 def print_stock_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(" CASH STOCK SWING RECOMMENDATIONS — 10 trading days, regular stocks only")
-    print(BAR)
+    print(_section_header("CASH STOCK SWING RECOMMENDATIONS — 10 trading days, regular stocks only"))
     if not recs:
         print("\n  No stock candidates passed the stock-specific filter today.")
         return
@@ -2794,11 +2797,10 @@ def print_stock_recommendations(recs):
             print(f"     Recent test split:   {int(r['test_trades'])} trades, {r['test_win_rate']:.1f}% win rate, avg {r['test_avg']:+.2f}%")
 
 def print_crypto_weekly_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(f" CRYPTO WEEKLY RECOMMENDATIONS — {CRYPTO_WEEKLY_HOLD_DAYS}-day hold, "
-        f"base €{CRYPTO_NOTIONAL_EUR:.0f} ATR-adjusted sizing, fee={CRYPTO_FEE_PCT*100:.2f}%/side")
-    print(BAR)
+    print(_section_header(
+        f"CRYPTO WEEKLY RECOMMENDATIONS — {CRYPTO_WEEKLY_HOLD_DAYS}-day hold, "
+        f"base €{CRYPTO_NOTIONAL_EUR:.0f} ATR-adjusted sizing, fee={CRYPTO_FEE_PCT*100:.2f}%/side"
+    ))
     print(f"\n  Predicted move must clear {CRYPTO_WEEKLY_MIN_PREDICTED_PCT:.1f}% "
         f"(round-trip fee is {2*CRYPTO_FEE_PCT*100:.2f}% of position notional)")
     if not recs:
@@ -2833,10 +2835,7 @@ def print_crypto_weekly_recommendations(recs):
         print(f"     Recent test split:   {int(r['test_trades'])} trades, {r['test_win_rate']:.1f}% win rate, avg {r['test_avg']:+.2f}%")
 
 def print_crypto_weekly_trade_suggestions(suggestions):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(f" CRYPTO WEEKLY TRADE SUGGESTIONS — actionable {CRYPTO_WEEKLY_HOLD_DAYS}-day BUY/TP/SL rows")
-    print(BAR)
+    print(_section_header(f"CRYPTO WEEKLY TRADE SUGGESTIONS — actionable {CRYPTO_WEEKLY_HOLD_DAYS}-day BUY/TP/SL rows"))
     if not suggestions:
         print("\n  No crypto weekly trade suggestions generated today.")
         return
@@ -2855,10 +2854,7 @@ def print_crypto_weekly_trade_suggestions(suggestions):
     print(f"\n  Saved to {CRYPTO_WEEKLY_TRADE_SUGGESTIONS_CSV}")
 
 def print_daytrade_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(" DAYTRADE RECOMMENDATIONS (mixed, excl. crypto) — 1-3 trading days")
-    print(BAR)
+    print(_section_header("DAYTRADE RECOMMENDATIONS (mixed, excl. crypto) — 1-3 trading days"))
     if not recs:
         print("\n  No 1-3 day candidates passed the fee-aware filter today.")
         return
@@ -2883,10 +2879,7 @@ def print_daytrade_recommendations(recs):
         print(f"     Recent test split:   {int(r['daytrade_test_trades'])} trades, {r['daytrade_test_win_rate']:.1f}% win rate, avg {r['daytrade_test_avg']:+.2f}%")
 
 def print_stock_daytrade_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(f" STOCK DAYTRADE RECOMMENDATIONS — cash stocks only, ~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position")
-    print(BAR)
+    print(_section_header(f"STOCK DAYTRADE RECOMMENDATIONS — cash stocks only, ~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position"))
     if not recs:
         print("\n  No cash stock passed the daytrade filter today.")
         return
@@ -2911,10 +2904,7 @@ def print_stock_daytrade_recommendations(recs):
         print(f"     Test split:          {int(r['stock_dt_test_trades'])} trades, {r['stock_dt_test_win_rate']:.1f}% win rate, avg {r['stock_dt_test_avg']:+.2f}%")
 
 def print_crypto_daytrade_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(f" CRYPTO DAYTRADE RECOMMENDATIONS — 1-3 day hold, base €{CRYPTO_NOTIONAL_EUR:.0f} ATR-adjusted sizing")
-    print(BAR)
+    print(_section_header(f"CRYPTO DAYTRADE RECOMMENDATIONS — 1-3 day hold, base €{CRYPTO_NOTIONAL_EUR:.0f} ATR-adjusted sizing"))
     print(f"\n  Predicted move must clear {CRYPTO_DAYTRADE_MIN_PREDICTED_PCT:.1f}% "
           f"(round-trip fee is {2*CRYPTO_FEE_PCT*100:.2f}% of position notional)")
     if not recs:
@@ -2946,10 +2936,7 @@ def print_crypto_daytrade_recommendations(recs):
         print(f"     Test split:          {int(r['crypto_dt_test_trades'])} trades, {r['crypto_dt_test_win_rate']:.1f}% win rate, avg {r['crypto_dt_test_avg']:+.2f}%")
 
 def print_crypto_mean_reversion_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(f" CRYPTO MEAN-REVERSION BOUNCES — RSI2<{CRYPTO_MR_RSI2_MAX:g}, green close, above SMA50")
-    print(BAR)
+    print(_section_header(f"CRYPTO MEAN-REVERSION BOUNCES — RSI2<{CRYPTO_MR_RSI2_MAX:g}, green close, above SMA50"))
     print(f"\n  Separate oversold-bounce track. Position size starts at €{CRYPTO_NOTIONAL_EUR:.0f} "
           f"and scales down when daily ATR% is above {CRYPTO_ATR_TARGET_PCT:.1f}%.")
     if not recs:
@@ -2978,11 +2965,10 @@ def print_crypto_mean_reversion_recommendations(recs):
         print(f"     MR test split:       {int(r['mr_test_trades'])} trades, {r['mr_test_win_rate']:.1f}% win rate, avg {r['mr_test_avg']:+.2f}%")
 
 def print_crypto_intraday_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(f" CRYPTO INTRADAY RECOMMENDATIONS — {CRYPTO_INTRADAY_HOLDS} hour holds, "
-            f"base €{CRYPTO_NOTIONAL_EUR:.0f} ATR-adjusted sizing, hourly bars")
-    print(BAR)
+    print(_section_header(
+        f"CRYPTO INTRADAY RECOMMENDATIONS — {CRYPTO_INTRADAY_HOLDS} hour holds, "
+        f"base €{CRYPTO_NOTIONAL_EUR:.0f} ATR-adjusted sizing, hourly bars"
+    ))
     print(f"\n  Predicted move must clear {CRYPTO_INTRADAY_MIN_PREDICTED_PCT:.1f}% "
           f"after Revolut fees ({2*CRYPTO_FEE_PCT*100:.2f}% round-trip).  Hourly bars from "
           f"yfinance go back ~{CRYPTO_INTRADAY_LOOKBACK} for backtesting.")
@@ -3025,10 +3011,7 @@ def print_crypto_intraday_recommendations(recs):
         print(f"     Hourly test split:   {int(r['intraday_test_trades'])} trades, {r['intraday_test_win_rate']:.1f}% win rate, avg {r['intraday_test_avg']:+.2f}%")
 
 def print_week_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(f" MIXED WEEK RECOMMENDATIONS — {WEEK_HOLD_DAYS}-day hold, all OOS-robust asset classes (excl. crypto)")
-    print(BAR)
+    print(_section_header(f"MIXED WEEK RECOMMENDATIONS — {WEEK_HOLD_DAYS}-day hold, all OOS-robust asset classes (excl. crypto)"))
     if not recs:
         print("\n  No instrument passed the 5-day-hold filter today.")
         return
@@ -3054,10 +3037,7 @@ def print_week_recommendations(recs):
         print(f"     5-day test split:    {int(r['week_test_trades'])} trades, {r['week_test_win_rate']:.1f}% win rate, avg {r['week_test_avg']:+.2f}%")
 
 def print_stock_week_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(f" STOCK WEEK RECOMMENDATIONS — cash stocks, {STOCK_WEEK_HOLD_DAYS}-day hold, ~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position")
-    print(BAR)
+    print(_section_header(f"STOCK WEEK RECOMMENDATIONS — cash stocks, {STOCK_WEEK_HOLD_DAYS}-day hold, ~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position"))
     if not recs:
         print("\n  No cash stock passed the 5-day filter today.")
         return
@@ -3086,11 +3066,10 @@ def print_stock_week_recommendations(recs):
         print(f"     Test split:          {int(r['sw_test_trades'])} trades, {r['sw_test_win_rate']:.1f}% win rate, avg {r['sw_test_avg']:+.2f}%")
 
 def print_stock_intraday_recommendations(recs):
-    BAR = "="*135
-    print("\n" + BAR)
-    print(f" STOCK INTRADAY RECOMMENDATIONS — cash stocks, hourly bars, "
-          f"~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position")
-    print(BAR)
+    print(_section_header(
+        f"STOCK INTRADAY RECOMMENDATIONS — cash stocks, hourly bars, "
+        f"~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position"
+    ))
     print(f"\n  Holds: {STOCK_INTRADAY_HOLDS} hours.  Stock hourly bars are sparse (~6.5/day for US),")
     print(f"  so filters use a looser min-trade count.  Predicted move floor: {STOCK_INTRADAY_MIN_PREDICTED_PCT:.2f}%.")
     if not recs:
@@ -3238,13 +3217,13 @@ def run_scan(iteration=0):
               f"{', '.join(failed[:8])}{'...' if len(failed) > 8 else ''})")
 
     scan_rows.sort(key=lambda x: x["predicted_net_eur"], reverse=True)
-    BAR = "="*135
+    BAR = "─" * 135
 
     # ============== FULL CURRENT SCAN ==============
-    print("\n" + BAR)
-    print(f" Revolut Bullish Scanner v10 — {datetime.now():%Y-%m-%d %H:%M}")
-    print(f" FULL CURRENT SCAN — all {len(scan_rows)} successfully analysed instruments")
-    print(BAR)
+    print(_section_header(
+        f"Revolut Bullish Scanner — {datetime.now():%Y-%m-%d %H:%M}  │  "
+        f"FULL CURRENT SCAN — {len(scan_rows)} instruments analysed"
+    ))
     print(f"{'#':<4}{'Instrument':<26}{'Class':<14}{'Price':>12}{'Sc':>4}{'DSc':>5}"
           f"{'RSI':>6}{'ADX':>6}{'Rgm':>4}{'BE%':>7}{'Pred%':>7}")
     print("-"*135)

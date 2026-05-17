@@ -352,8 +352,10 @@ def _render_metric_list(metrics: Sequence[tuple[str, str]]) -> str:
         return "<p class=\"empty\">No metrics.</p>"
     parts = []
     for label, value in metrics:
+        cls = _metric_value_class(value)
+        div_class = f"metric {cls}".strip()
         parts.append(
-            "<div class=\"metric\">"
+            f"<div class=\"{div_class}\">"
             f"<dt>{html.escape(label)}</dt><dd>{html.escape(value)}</dd>"
             "</div>"
         )
@@ -371,9 +373,13 @@ def _render_recommendation_card(track_name: str, row: Mapping[str, Any], rank: i
     if asset_class and asset_class != "n/a":
         badges.append(f"<span class=\"badge\">{html.escape(asset_class)}</span>")
     if row.get("confidence_tier"):
-        badges.append(f"<span class=\"badge badge-tier\">{html.escape(str(row.get('confidence_tier')))}</span>")
+        tier = str(row.get("confidence_tier", "")).lower()
+        tier_cls = f"badge-tier-{tier}" if tier in ("high", "medium", "speculative") else "badge-tier-speculative"
+        badges.append(f"<span class=\"badge {tier_cls}\">{html.escape(str(row.get('confidence_tier')))}</span>")
     if live_status:
-        badges.append(f"<span class=\"badge badge-live\">{html.escape(live_status)}</span>")
+        ls_map = {"NEW": "new", "UPDATED": "updated", "TP HIT": "tp-hit", "SL HIT": "sl-hit"}
+        live_cls = f"badge-live-{ls_map.get(live_status, 'live')}"
+        badges.append(f"<span class=\"badge {live_cls}\">{html.escape(live_status)}</span>")
     if row.get("mtf_aligned"):
         badges.append("<span class=\"badge badge-aligned\">aligned</span>")
     if row.get("portfolio_accept") is False:
@@ -642,6 +648,57 @@ def build_run_summary(
     }
 
 
+def _cell_class(column: str, value: Any) -> str:
+    """Return a CSS class for semantic table cell coloring."""
+    col = column.lower()
+    if isinstance(value, float) and value == value:  # not NaN
+        pct_cols = {
+            "expected_roi_pct", "daytrade_expected_roi_pct", "intraday_expected_roi_pct",
+            "test_avg", "bt_avg", "predicted_net_eur",
+        }
+        if col in pct_cols:
+            return "val-pos" if value > 0 else ("val-neg" if value < 0 else "")
+    if isinstance(value, str):
+        v = value.strip()
+        if v.upper() == "ROBUST":
+            return "verdict-robust"
+        if v.upper() == "WEAK":
+            return "verdict-weak"
+        if v.upper() == "OVERFIT":
+            return "verdict-overfit"
+        if v.lower() == "high":
+            return "tier-high"
+        if v.lower() == "medium":
+            return "tier-medium"
+        if v.lower() == "speculative":
+            return "tier-speculative"
+    return ""
+
+
+def _metric_value_class(value: str) -> str:
+    """Return a CSS class for metric card value coloring."""
+    v = value.strip()
+    if v.startswith("+") and v not in ("+0.00%", "+0.00 EUR", "+0.00"):
+        return "m-pos"
+    if v.startswith("-") and v not in ("-0.00%", "-0.00 EUR", "-0.00"):
+        return "m-neg"
+    return ""
+
+
+def _render_track_pills(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Render track row counts as badge pills instead of a table."""
+    parts = []
+    for row in rows:
+        count = int(row.get("count", 0))
+        track = html.escape(str(row.get("track", "")))
+        count_class = "pc" if count > 0 else "pc-zero"
+        parts.append(
+            f"<span class=\"track-pill\">{track}"
+            f"<span class=\"{count_class}\">{count}</span></span>"
+        )
+    return "<div class=\"track-pills\">" + "".join(parts) + "</div>"
+
+
 def _render_table(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> str:
     if not rows:
         return "<p class=\"empty\">No rows.</p>"
@@ -651,10 +708,12 @@ def _render_table(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> 
         cells = []
         for column in columns:
             value = row.get(column, "")
-            if isinstance(value, float):
-                cells.append(f"<td>{value:.2f}</td>")
+            cls = _cell_class(column, value)
+            cls_attr = f" class=\"{cls}\"" if cls else ""
+            if isinstance(value, float) and value == value:
+                cells.append(f"<td{cls_attr}>{value:.2f}</td>")
             else:
-                cells.append(f"<td>{html.escape(str(value))}</td>")
+                cells.append(f"<td{cls_attr}>{html.escape(str(value))}</td>")
         body_parts.append("<tr>" + "".join(cells) + "</tr>")
     return "<table><thead><tr>" + head + "</tr></thead><tbody>" + "".join(body_parts) + "</tbody></table>"
 
@@ -690,10 +749,21 @@ def render_html_dashboard(
     ]
 
     sections = []
+    _asset_count = run_summary.get("asset_count", 0)
+    _failed_count = run_summary.get("failed_count", 0)
+    _total_recs = sum(len(rows) for rows in dashboard_tracks.values())
+    _run_id = html.escape(str(run_summary.get("run_id", "")))
+    _run_ts = html.escape(str(run_summary.get("started_at", "")))
     sections.append(
         "<section class=\"hero\">"
-        f"<p class=\"eyebrow\">Revolut scanner</p><h1>Run {html.escape(str(run_summary.get('run_id', '')))}</h1>"
-        f"<p class=\"lede\">{html.escape(str(run_summary.get('started_at', '')))} · assets {run_summary.get('asset_count', 0)} · failed {run_summary.get('failed_count', 0)}</p>"
+        f"<p class=\"eyebrow\">Revolut Scanner</p>"
+        f"<h1>Run {_run_id}</h1>"
+        f"<p class=\"lede\">{_run_ts}</p>"
+        "<div class=\"hero-stats\">"
+        f"<div class=\"stat\"><div class=\"stat-num\">{_asset_count}</div><div class=\"stat-label\">Assets scanned</div></div>"
+        f"<div class=\"stat\"><div class=\"stat-num\">{_total_recs}</div><div class=\"stat-label\">Total recommendations</div></div>"
+        f"<div class=\"stat\"><div class=\"stat-num\">{_failed_count}</div><div class=\"stat-label\">Failed downloads</div></div>"
+        "</div>"
         "</section>"
     )
     sections.append(
@@ -703,7 +773,7 @@ def render_html_dashboard(
         "</section>"
     )
     sections.append(
-        "<section><h2>Track counts</h2>" + _render_table(track_rows_summary, ["track", "count"]) + "</section>"
+        "<section><h2>Track counts</h2>" + _render_track_pills(track_rows_summary) + "</section>"
     )
     top_rows = []
     for track, rows in dashboard_tracks.items():
@@ -746,75 +816,235 @@ def render_html_dashboard(
 <head>
   <meta charset=\"utf-8\">
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-  <title>Revolut Scanner Dashboard</title>
+  <title>Revolut Scanner — {_run_id}</title>
   <style>
     :root {{
-      --ink: #1f2430;
-      --muted: #5f6574;
-      --panel: rgba(255,255,255,0.82);
-      --border: rgba(31,36,48,0.12);
-      --accent: #b8442c;
-      --accent-soft: #f2dfd6;
-      --bg-a: #f7ead7;
-      --bg-b: #d7e4f2;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --subtle: #94a3b8;
+      --panel: #ffffff;
+      --panel-alt: #f8fafc;
+      --border: #e2e8f0;
+      --border-strong: #cbd5e1;
+      --accent: #c84b2f;
+      --accent-light: #fef2ee;
+      --bg: #f1f5f9;
+      --green: #16a34a;
+      --green-bg: #f0fdf4;
+      --green-border: rgba(22,163,74,0.2);
+      --red: #dc2626;
+      --red-bg: #fef2f2;
+      --red-border: rgba(220,38,38,0.2);
+      --amber: #d97706;
+      --amber-bg: #fffbeb;
+      --amber-border: rgba(217,119,6,0.2);
+      --blue: #2563eb;
+      --blue-bg: #eff6ff;
+      --blue-border: rgba(37,99,235,0.2);
+      --r-sm: 10px;
+      --r-md: 16px;
+      --r-lg: 20px;
+      --shadow-sm: 0 1px 3px rgba(15,23,42,0.08);
+      --shadow-md: 0 4px 16px rgba(15,23,42,0.08), 0 1px 4px rgba(15,23,42,0.04);
     }}
-    * {{ box-sizing: border-box; }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
-      margin: 0;
       color: var(--ink);
-      font-family: "Avenir Next", "Trebuchet MS", sans-serif;
-      background: radial-gradient(circle at top left, rgba(184,68,44,0.16), transparent 30%), linear-gradient(135deg, var(--bg-a), var(--bg-b));
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Helvetica Neue", sans-serif;
+      font-size: 15px;
+      background: var(--bg);
       min-height: 100vh;
+      line-height: 1.5;
     }}
-    main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
+    .site-header {{
+      background: var(--ink);
+      color: white;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      height: 50px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 2px 8px rgba(0,0,0,0.25);
+    }}
+    .site-header .brand {{
+      font-weight: 700;
+      font-size: 0.8rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }}
+    .site-header .header-pill {{
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 2px 9px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.12);
+      color: rgba(255,255,255,0.8);
+    }}
+    .site-header .run-meta {{
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.38);
+      margin-left: auto;
+    }}
+    main {{ max-width: 1200px; margin: 0 auto; padding: 24px 20px 64px; }}
     section {{
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 20px;
+      border-radius: var(--r-lg);
       padding: 20px 22px;
-      margin-bottom: 18px;
-      box-shadow: 0 18px 60px rgba(31,36,48,0.08);
-      backdrop-filter: blur(14px);
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-sm);
     }}
-    .hero {{ padding: 30px 24px; }}
-        .disclaimer {{ border-color: rgba(184,68,44,0.28); background: linear-gradient(135deg, rgba(242,223,214,0.98), rgba(255,255,255,0.9)); }}
-    .eyebrow {{ text-transform: uppercase; letter-spacing: 0.18em; color: var(--accent); font-size: 12px; margin: 0 0 8px; }}
-        h1, h2, h3 {{ font-family: ui-serif, Georgia, "Times New Roman", serif; margin: 0 0 10px; }}
-    h1 {{ font-size: clamp(2rem, 5vw, 3.4rem); line-height: 0.95; }}
-    h2 {{ font-size: 1.35rem; }}
-        h3 {{ font-size: 1.15rem; }}
-    .lede {{ color: var(--muted); margin: 0; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 0.94rem; }}
-    th, td {{ padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--border); }}
-    th {{ color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; }}
-    tbody tr:hover {{ background: rgba(184,68,44,0.05); }}
-    .empty {{ color: var(--muted); margin: 0; }}
-        .recommendation-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-top: 18px; }}
-        .rec-card {{ border: 1px solid var(--border); border-radius: 18px; padding: 16px; background: rgba(255,255,255,0.72); box-shadow: inset 0 1px 0 rgba(255,255,255,0.45); }}
-        .card-badges {{ display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }}
-        .badge {{ display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 10px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; background: rgba(31,36,48,0.08); color: var(--ink); }}
-        .badge-rank {{ background: var(--accent); color: white; }}
-        .badge-tier {{ background: rgba(183,124,33,0.14); color: #7c5317; }}
-        .badge-live {{ background: rgba(34,139,100,0.14); color: #17684b; }}
-        .badge-aligned {{ background: rgba(11,108,163,0.14); color: #0f567d; }}
-        .badge-flagged {{ background: rgba(184,68,44,0.14); color: #8a2f1f; }}
-        .card-kicker {{ margin: 0 0 14px; color: var(--muted); }}
-        .metric-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; margin: 0; }}
-        .metric {{ padding: 10px 12px; border-radius: 14px; background: rgba(31,36,48,0.04); }}
-        .metric dt {{ margin: 0 0 4px; color: var(--muted); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.08em; }}
-        .metric dd {{ margin: 0; font-size: 0.98rem; font-weight: 600; }}
-        .card-copy {{ margin: 14px 0 0; color: var(--ink); line-height: 1.45; }}
-        .card-copy.warning {{ color: #8a2f1f; }}
+    .hero {{
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 60%, #1e3a5f 100%);
+      color: white;
+      padding: 36px 28px;
+      border: none;
+    }}
+    .hero .eyebrow {{
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: #f97316;
+      margin-bottom: 10px;
+    }}
+    .hero h1 {{
+      font-size: clamp(1.75rem, 4vw, 2.75rem);
+      font-weight: 800;
+      color: white;
+      margin-bottom: 8px;
+      line-height: 1.1;
+    }}
+    .hero .lede {{ color: rgba(255,255,255,0.45); font-size: 0.85rem; }}
+    .hero-stats {{ display: flex; gap: 28px; margin-top: 22px; flex-wrap: wrap; }}
+    .stat-num {{ font-size: 2rem; font-weight: 800; color: white; line-height: 1; }}
+    .stat-label {{
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+      color: rgba(255,255,255,0.4);
+      margin-top: 4px;
+    }}
+    .disclaimer {{ background: var(--amber-bg); border-color: var(--amber-border); }}
+    .disclaimer h2 {{ color: var(--amber); }}
+    .disclaimer .lede {{ color: #92400e; font-size: 0.85rem; }}
+    h2 {{ font-size: 1.0rem; font-weight: 700; color: var(--ink); margin-bottom: 12px; }}
+    h3 {{ font-size: 0.95rem; font-weight: 700; color: var(--ink); margin-bottom: 4px; }}
+    .lede {{ color: var(--muted); font-size: 0.85rem; }}
+    .track-pills {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .track-pill {{
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 12px 5px 10px;
+      border-radius: 999px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      font-size: 0.78rem;
+      color: var(--muted);
+    }}
+    .track-pill .pc {{
+      font-size: 0.72rem; font-weight: 700; padding: 1px 7px;
+      border-radius: 999px; background: var(--accent); color: white;
+    }}
+    .track-pill .pc-zero {{
+      font-size: 0.72rem; font-weight: 600; padding: 1px 7px;
+      border-radius: 999px; background: var(--border); color: var(--subtle);
+    }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 0.875rem; }}
+    thead {{ border-bottom: 2px solid var(--border); }}
+    th {{
+      padding: 7px 10px; text-align: left; color: var(--subtle);
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.09em; white-space: nowrap;
+    }}
+    td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }}
+    tbody tr:last-child td {{ border-bottom: none; }}
+    tbody tr:hover td {{ background: rgba(15,23,42,0.025); }}
+    .val-pos {{ color: var(--green); font-weight: 600; }}
+    .val-neg {{ color: var(--red); font-weight: 600; }}
+    .verdict-robust {{ color: var(--green); font-weight: 700; }}
+    .verdict-weak {{ color: var(--amber); font-weight: 700; }}
+    .verdict-overfit {{ color: var(--red); font-weight: 600; }}
+    .tier-high {{ color: var(--green); font-weight: 600; }}
+    .tier-medium {{ color: var(--amber); font-weight: 600; }}
+    .tier-speculative {{ color: var(--subtle); }}
+    .empty {{ color: var(--subtle); font-size: 0.875rem; padding: 4px 0; }}
+    .recommendation-section > h2 {{
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.14em; color: var(--accent);
+      padding-bottom: 8px; border-bottom: 2px solid var(--accent-light);
+      margin-bottom: 6px;
+    }}
+    .recommendation-section > .lede {{ margin-bottom: 14px; }}
+    .recommendation-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 12px; margin-top: 12px;
+    }}
+    .rec-card {{
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: var(--r-md); padding: 16px;
+      box-shadow: var(--shadow-sm); display: flex; flex-direction: column;
+      transition: box-shadow 0.15s, border-color 0.15s;
+    }}
+    .rec-card:hover {{ box-shadow: var(--shadow-md); border-color: var(--border-strong); }}
+    .card-badges {{ display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }}
+    .badge {{
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: 999px;
+      font-size: 0.66rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.07em;
+      background: var(--panel-alt); border: 1px solid var(--border); color: var(--muted);
+    }}
+    .badge-rank {{ background: var(--ink); color: white; border-color: transparent; }}
+    .badge-tier-high {{ background: var(--green-bg); color: var(--green); border-color: var(--green-border); }}
+    .badge-tier-medium {{ background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); }}
+    .badge-tier-speculative {{ background: var(--panel-alt); color: var(--subtle); }}
+    .badge-live-new {{ background: var(--green-bg); color: var(--green); border-color: var(--green-border); font-weight: 800; }}
+    .badge-live-updated {{ background: var(--blue-bg); color: var(--blue); border-color: var(--blue-border); }}
+    .badge-live-tp-hit {{ background: var(--green-bg); color: var(--green); border-color: var(--green-border); font-weight: 800; }}
+    .badge-live-sl-hit {{ background: var(--red-bg); color: var(--red); border-color: var(--red-border); font-weight: 800; }}
+    .badge-aligned {{ background: var(--blue-bg); color: var(--blue); border-color: var(--blue-border); }}
+    .badge-flagged {{ background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); }}
+    .card-kicker {{ font-size: 0.78rem; color: var(--muted); margin-bottom: 12px; }}
+    .metric-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 0 0 10px; }}
+    .metric {{
+      padding: 8px 10px; border-radius: var(--r-sm);
+      background: var(--panel-alt); border: 1px solid var(--border);
+    }}
+    .metric dt {{
+      font-size: 0.64rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.09em; color: var(--subtle); margin-bottom: 2px;
+    }}
+    .metric dd {{ font-size: 0.9rem; font-weight: 700; color: var(--ink); word-break: break-word; }}
+    .metric.m-pos dd {{ color: var(--green); }}
+    .metric.m-neg dd {{ color: var(--red); }}
+    .metric.m-muted dd {{ color: var(--muted); font-weight: 400; font-size: 0.8rem; }}
+    .card-copy {{ font-size: 0.8rem; color: var(--muted); line-height: 1.5; margin-top: 8px; }}
+    .card-copy strong {{ color: var(--ink); }}
+    .card-copy.warning {{ color: var(--red); }}
+    .card-copy.warning strong {{ color: var(--red); }}
     @media (max-width: 760px) {{
-      main {{ padding: 18px 12px 36px; }}
-      section {{ padding: 16px; border-radius: 16px; overflow-x: auto; }}
-      table {{ min-width: 520px; }}
-            .recommendation-grid {{ grid-template-columns: 1fr; }}
-            .metric-grid {{ grid-template-columns: 1fr; }}
+      main {{ padding: 14px 12px 48px; }}
+      section {{ padding: 14px; border-radius: var(--r-md); overflow-x: auto; }}
+      table {{ min-width: 480px; }}
+      .recommendation-grid {{ grid-template-columns: 1fr; }}
+      .metric-grid {{ grid-template-columns: 1fr; }}
+      th, td {{ padding: 6px 8px; }}
+      .site-header .run-meta {{ display: none; }}
     }}
   </style>
 </head>
 <body>
+  <header class=\"site-header\">
+    <span class=\"brand\">Revolut Scanner</span>
+    <span class=\"header-pill\">{_total_recs} recs</span>
+    <span class=\"run-meta\">{_run_ts}</span>
+  </header>
   <main>
     {''.join(sections)}
   </main>
