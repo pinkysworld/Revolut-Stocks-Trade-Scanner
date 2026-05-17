@@ -93,6 +93,16 @@ def _metric(row: Mapping[str, Any], *keys: str) -> float:
     return 0.0
 
 
+def _as_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(numeric):
+        return None
+    return numeric
+
+
 def _first_text(row: Mapping[str, Any], *keys: str) -> str:
     for key in keys:
         value = row.get(key)
@@ -129,6 +139,13 @@ def _format_price(value: Any, currency: str = "", decimals: int = 4) -> str:
     return f"{text} {currency}".strip() if text != "n/a" else text
 
 
+def _format_regime(value: Any) -> str:
+    numeric = _as_float(value)
+    if numeric is None:
+        return "n/a"
+    return f"{int(round(numeric)):+d}"
+
+
 def _hold_label(row: Mapping[str, Any]) -> str:
     hold_days = row.get("hold_days")
     hold_hours = row.get("hold_hours")
@@ -147,38 +164,38 @@ def _hold_label(row: Mapping[str, Any]) -> str:
 
 def _dashboard_track_title(track_name: str) -> str:
     titles = {
-        "swing": "CONCRETE TRADING RECOMMENDATIONS — 2-week net ROI (mixed asset classes, excl. crypto)",
-        "week": "MIXED WEEK RECOMMENDATIONS — clean 5-day setups across non-crypto tracks",
-        "stock_swing": "CASH STOCK SWING RECOMMENDATIONS — regular stocks only",
-        "stock_week": "STOCK WEEK RECOMMENDATIONS — cash stocks, 5-day hold",
-        "crypto_weekly": "CRYPTO WEEKLY RECOMMENDATIONS — fee-aware weekly crypto setups",
-        "crypto_weekly_trade_suggestions": "CRYPTO WEEKLY TRADE SUGGESTIONS — actionable BUY / TP / SL rows",
-        "daytrade": "DAYTRADE RECOMMENDATIONS (mixed, excl. crypto) — 1-3 trading days",
-        "stock_daytrade": "STOCK DAYTRADE RECOMMENDATIONS — cash stocks only",
-        "crypto_daytrade": "CRYPTO DAYTRADE RECOMMENDATIONS — 1-3 day hold",
-        "crypto_mean_reversion": "CRYPTO MEAN-REVERSION BOUNCES — oversold bounce track",
-        "stock_intraday": "STOCK INTRADAY RECOMMENDATIONS — hourly stock setups",
-        "crypto_intraday": "CRYPTO INTRADAY RECOMMENDATIONS — hourly crypto setups",
+        "swing": "Mixed swing",
+        "week": "Mixed week",
+        "stock_swing": "Stock swing",
+        "stock_week": "Stock week",
+        "crypto_weekly": "Crypto weekly",
+        "crypto_weekly_trade_suggestions": "Crypto trade tickets",
+        "daytrade": "Mixed daytrade",
+        "stock_daytrade": "Stock daytrade",
+        "crypto_daytrade": "Crypto daytrade",
+        "crypto_mean_reversion": "Crypto mean reversion",
+        "stock_intraday": "Stock intraday",
+        "crypto_intraday": "Crypto intraday",
     }
     return titles.get(track_name, track_name.replace("_", " ").title())
 
 
 def _dashboard_track_subtitle(track_name: str) -> str:
     subtitles = {
-        "swing": "Filter applied: OOS-robust non-crypto class, score above threshold, positive net after fees, and reward:risk above the configured floor.",
-        "week": "Mirrors the console week section with clean hold, market, move, fee, ROI, and backtest context.",
-        "stock_swing": "Mirrors the console stock swing section with full-backtest and recent test-split context.",
-        "stock_week": "Shows the same clean stock-week card details as the terminal output, including sizing and backtest context.",
-        "crypto_weekly": "Mirrors the weekly crypto console block with BTC-relative context, fees, ROI, and ATR-sized notionals.",
-        "crypto_weekly_trade_suggestions": "Compact execution-oriented rows copied into card format, with the same disclaimer shown above.",
-        "daytrade": "Mirrors the mixed non-crypto daytrade section with hold, fees, ROI, and test-split detail.",
-        "stock_daytrade": "Cash stock daytrade cards with suggested hold, position sizing, ROI, and recent test split.",
-        "crypto_daytrade": "Crypto daytrade cards with BTC-relative context, fees, ROI, and per-track backtest detail.",
-        "crypto_mean_reversion": "Oversold bounce cards with RSI / ATR context and mean-reversion backtest detail.",
-        "stock_intraday": "Hourly stock cards with daily/daytrade/intraday score alignment, fees, and hourly backtest detail.",
-        "crypto_intraday": "Hourly crypto cards with BTC-relative context and multi-timeframe alignment markers where available.",
+        "swing": "Two-week non-crypto setups filtered for score, reward:risk, fees, and OOS strength.",
+        "week": "Five-day non-crypto ideas with clean market, move, fee, and ROI context.",
+        "stock_swing": "Regular stock swings with full backtest and recent split context.",
+        "stock_week": "Cash stock ideas sized for a five-day hold.",
+        "crypto_weekly": "Weekly crypto setups with BTC-relative context and fee-aware targets.",
+        "crypto_weekly_trade_suggestions": "Ready-to-place crypto tickets with entry, target, stop, and sizing.",
+        "daytrade": "One-to-three-day non-crypto ideas with fee and ROI checks.",
+        "stock_daytrade": "Cash stock daytrade setups with sizing and recent test split.",
+        "crypto_daytrade": "Short-hold crypto setups with BTC-relative context and fee checks.",
+        "crypto_mean_reversion": "Oversold crypto bounce candidates with RSI and ATR context.",
+        "stock_intraday": "Hourly stock setups with daily, daytrade, and intraday score alignment.",
+        "crypto_intraday": "Hourly crypto setups with BTC-relative and multi-timeframe context.",
     }
-    return subtitles.get(track_name, "Console recommendation section rendered in plain HTML.")
+    return subtitles.get(track_name, "Recommendation candidates for the current run.")
 
 
 def _hold_metric_label(track_name: str) -> str:
@@ -229,11 +246,11 @@ def _signal_context_metric(track_name: str, row: Mapping[str, Any]) -> tuple[str
     if track_name in {"stock_intraday", "crypto_intraday"}:
         return (
             "Hourly RSI / ADX / regime",
-            f"{_format_number(rsi, decimals=1)} / {_format_number(adx, decimals=1)} / {regime:+d}" if regime is not None else f"{_format_number(rsi, decimals=1)} / {_format_number(adx, decimals=1)} / n/a",
+            f"{_format_number(rsi, decimals=1)} / {_format_number(adx, decimals=1)} / {_format_regime(regime)}",
         )
     return (
         "RSI / ADX / regime",
-        f"{_format_number(rsi, decimals=1)} / {_format_number(adx, decimals=1)} / {regime:+d}" if regime is not None else f"{_format_number(rsi, decimals=1)} / {_format_number(adx, decimals=1)} / n/a",
+        f"{_format_number(rsi, decimals=1)} / {_format_number(adx, decimals=1)} / {_format_regime(regime)}",
     )
 
 
@@ -258,8 +275,10 @@ def _recommendation_metric_rows(track_name: str, row: Mapping[str, Any]) -> list
     raw_price = row.get("price", row.get("entry_price"))
     scan_price = row.get("close_at_scan")
     price_str = _format_price(raw_price, currency, decimals=decimals)
-    if scan_price and raw_price and scan_price > 0:
-        drift = (raw_price / scan_price - 1) * 100
+    raw_price_num = _as_float(raw_price)
+    scan_price_num = _as_float(scan_price)
+    if raw_price_num is not None and scan_price_num is not None and scan_price_num > 0:
+        drift = (raw_price_num / scan_price_num - 1) * 100
         if abs(drift) >= 0.05:
             price_str = f"{price_str} ({drift:+.2f}% vs scan)"
     as_of = row.get("live_price_as_of")
@@ -364,7 +383,7 @@ def _render_metric_list(metrics: Sequence[tuple[str, str]]) -> str:
         return "<p class=\"empty\">No metrics.</p>"
     parts = []
     for label, value in metrics:
-        cls = _metric_value_class(value)
+        cls = " ".join(part for part in (_metric_value_class(value), _metric_label_class(label)) if part)
         div_class = f"metric {cls}".strip()
         parts.append(
             f"<div class=\"{div_class}\">"
@@ -697,12 +716,23 @@ def _metric_value_class(value: str) -> str:
     return ""
 
 
+def _metric_label_class(label: str) -> str:
+    text = label.lower()
+    if "entry price" in text:
+        return "metric-entry"
+    if "expected net roi" in text or "reward:risk" in text:
+        return "metric-priority"
+    if "stop-loss" in text or "max loss" in text:
+        return "metric-risk"
+    return ""
+
+
 def _render_track_pills(rows: Sequence[Mapping[str, Any]]) -> str:
     """Render track row counts as badge pills instead of a table."""
     parts = []
     for row in rows:
         count = int(row.get("count", 0))
-        track = html.escape(str(row.get("track", "")))
+        track = html.escape(_dashboard_track_title(str(row.get("track", ""))))
         count_class = "pc" if count > 0 else "pc-zero"
         parts.append(
             f"<span class=\"track-pill\">{track}"
@@ -727,7 +757,7 @@ def _render_table(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> 
             else:
                 cells.append(f"<td{cls_attr}>{html.escape(str(value))}</td>")
         body_parts.append("<tr>" + "".join(cells) + "</tr>")
-    return "<table><thead><tr>" + head + "</tr></thead><tbody>" + "".join(body_parts) + "</tbody></table>"
+    return "<div class=\"table-wrap\"><table><thead><tr>" + head + "</tr></thead><tbody>" + "".join(body_parts) + "</tbody></table></div>"
 
 
 def render_html_dashboard(
@@ -765,34 +795,49 @@ def render_html_dashboard(
     _asset_count = run_summary.get("asset_count", 0)
     _failed_count = run_summary.get("failed_count", 0)
     _total_recs = sum(len(rows) for rows in dashboard_tracks.values())
+    _accepted_positions = risk_summary.get("accepted_positions", 0)
+    _rejected_positions = risk_summary.get("rejected_positions", 0)
+    _quality_issue_count = len(quality_issues)
+    _rejection_count = sum(rejection_counts.values())
     _run_id = html.escape(str(run_summary.get("run_id", "")))
     _run_ts = html.escape(str(run_summary.get("started_at", "")))
+    try:
+        _refresh_secs = int(refresh_secs or 0)
+    except (TypeError, ValueError):
+        _refresh_secs = 0
+    _refresh_label = f"Auto refresh every {max(1, round(_refresh_secs / 60))} min" if _refresh_secs > 0 else "Static snapshot"
     sections.append(
         "<section class=\"hero\">"
-        f"<p class=\"eyebrow\">Revolut Scanner</p>"
-        f"<h1>Run {_run_id}</h1>"
-        f"<p class=\"lede\">{_run_ts}</p>"
+        "<div class=\"hero-copy\">"
+        "<p class=\"eyebrow\">Revolut Scanner</p>"
+        "<h1>Trading Dashboard</h1>"
+        f"<p class=\"lede\">Run <strong>{_run_id}</strong> · {_run_ts} · {_refresh_label}</p>"
+        "</div>"
         "<div class=\"hero-stats\">"
         f"<div class=\"stat\"><div class=\"stat-num\">{_asset_count}</div><div class=\"stat-label\">Assets scanned</div></div>"
-        f"<div class=\"stat\"><div class=\"stat-num\">{_total_recs}</div><div class=\"stat-label\">Total recommendations</div></div>"
-        f"<div class=\"stat\"><div class=\"stat-num\">{_failed_count}</div><div class=\"stat-label\">Failed downloads</div></div>"
+        f"<div class=\"stat\"><div class=\"stat-num\">{_total_recs}</div><div class=\"stat-label\">Recommendations</div></div>"
+        f"<div class=\"stat\"><div class=\"stat-num\">{_accepted_positions}</div><div class=\"stat-label\">Accepted positions</div></div>"
+        f"<div class=\"stat\"><div class=\"stat-num\">{_quality_issue_count}</div><div class=\"stat-label\">Data issues</div></div>"
         "</div>"
         "</section>"
     )
     sections.append(
-        "<section class=\"disclaimer\">"
-        "<h2>Disclaimer</h2>"
-        "<p class=\"lede\">Educational and research use only. Not financial advice, no guarantee of accuracy or profitability, and all trades remain your responsibility. Fees, spreads, liquidity, and market hours can change before execution.</p>"
+        "<section class=\"notice\">"
+        "<strong>Educational use only.</strong> "
+        "Not financial advice. Fees, spreads, liquidity, and market hours can change before execution."
         "</section>"
     )
     sections.append(
-        "<section><h2>Track counts</h2>" + _render_track_pills(track_rows_summary) + "</section>"
+        "<section class=\"section-block\">"
+        "<div class=\"section-heading\"><p class=\"eyebrow\">Coverage</p><h2>Track counts</h2></div>"
+        + _render_track_pills(track_rows_summary)
+        + "</section>"
     )
     top_rows = []
     for track, rows in dashboard_tracks.items():
         for row in list(rows)[:5]:
             top_rows.append({
-                "track": track,
+                "track": _dashboard_track_title(track),
                 "ticker": row.get("ticker"),
                 "asset_class": row.get("asset_class"),
                 "confidence_tier": row.get("confidence_tier"),
@@ -800,33 +845,39 @@ def render_html_dashboard(
                 "portfolio_accept": row.get("portfolio_accept", True),
             })
     sections.append(
-        "<section><h2>Top ideas</h2>" + _render_table(top_rows, ["track", "ticker", "asset_class", "confidence_tier", "expected_roi_pct", "portfolio_accept"]) + "</section>"
-    )
-    sections.append(
-        "<section><h2>Portfolio guardrails</h2>" + _render_table([
+        "<div class=\"panel-grid\">"
+        "<section class=\"panel panel-wide\"><div class=\"section-heading\"><p class=\"eyebrow\">Ranked</p><h2>Top ideas</h2></div>"
+        + _render_table(top_rows, ["track", "ticker", "asset_class", "confidence_tier", "expected_roi_pct", "portfolio_accept"])
+        + "</section>"
+        + "<section class=\"panel\"><div class=\"section-heading\"><p class=\"eyebrow\">Risk</p><h2>Portfolio guardrails</h2></div>"
+        + _render_table([
             {"accepted_positions": risk_summary.get("accepted_positions", 0),
              "rejected_positions": risk_summary.get("rejected_positions", 0),
              "total_risk_eur": risk_summary.get("total_risk_eur", 0.0),
              "total_crypto_notional_eur": risk_summary.get("total_crypto_notional_eur", 0.0)}
-        ], ["accepted_positions", "rejected_positions", "total_risk_eur", "total_crypto_notional_eur"]) + "</section>"
+        ], ["accepted_positions", "rejected_positions", "total_risk_eur", "total_crypto_notional_eur"])
+        + "</section></div>"
     )
     sections.append(
-        "<section><h2>Data quality</h2>" + _render_table(quality_issues[:20], ["ticker", "asset_class", "status", "bars", "stale_days", "note"]) + "</section>"
-    )
-    sections.append(
-        "<section><h2>Rejections</h2>" + _render_table(
+        "<div class=\"panel-grid panel-grid-three\">"
+        "<section class=\"panel\"><div class=\"section-heading\"><p class=\"eyebrow\">Data</p><h2>Data quality</h2></div>"
+        + _render_table(quality_issues[:20], ["ticker", "asset_class", "status", "bars", "stale_days", "note"])
+        + "</section>"
+        + f"<section class=\"panel\"><div class=\"section-heading\"><p class=\"eyebrow\">Filters</p><h2>Rejections</h2><span>{_rejection_count} total</span></div>"
+        + _render_table(
             [{"reason": reason, "count": count} for reason, count in rejection_counts.most_common(15)],
             ["reason", "count"],
-        ) + "</section>"
-    )
-    sections.append(
-        "<section><h2>OOS verdicts</h2>" + _render_table(oos_rows, ["asset_class", "thr", "hold", "verdict", "test_avg"]) + "</section>"
+        )
+        + "</section>"
+        + f"<section class=\"panel\"><div class=\"section-heading\"><p class=\"eyebrow\">Validation</p><h2>OOS verdicts</h2><span>{_failed_count} failed downloads</span></div>"
+        + _render_table(oos_rows, ["asset_class", "thr", "hold", "verdict", "test_avg"])
+        + "</section></div>"
     )
     sections.append(_render_recommendation_sections(dashboard_tracks))
 
     _meta_refresh = (
-        f'<meta http-equiv="refresh" content="{refresh_secs}">'
-        if refresh_secs > 0 else ""
+        f'<meta http-equiv="refresh" content="{_refresh_secs}">'
+        if _refresh_secs > 0 else ""
     )
     return f"""<!doctype html>
 <html lang=\"en\">
@@ -837,33 +888,35 @@ def render_html_dashboard(
   <title>Revolut Scanner — {_run_id}</title>
   <style>
     :root {{
-      --ink: #0f172a;
-      --muted: #64748b;
-      --subtle: #94a3b8;
+            --ink: #18181b;
+            --muted: #626975;
+            --subtle: #8b95a1;
       --panel: #ffffff;
-      --panel-alt: #f8fafc;
-      --border: #e2e8f0;
-      --border-strong: #cbd5e1;
-      --accent: #c84b2f;
-      --accent-light: #fef2ee;
-      --bg: #f1f5f9;
-      --green: #16a34a;
-      --green-bg: #f0fdf4;
-      --green-border: rgba(22,163,74,0.2);
-      --red: #dc2626;
-      --red-bg: #fef2f2;
-      --red-border: rgba(220,38,38,0.2);
-      --amber: #d97706;
-      --amber-bg: #fffbeb;
-      --amber-border: rgba(217,119,6,0.2);
-      --blue: #2563eb;
-      --blue-bg: #eff6ff;
-      --blue-border: rgba(37,99,235,0.2);
-      --r-sm: 10px;
-      --r-md: 16px;
-      --r-lg: 20px;
-      --shadow-sm: 0 1px 3px rgba(15,23,42,0.08);
-      --shadow-md: 0 4px 16px rgba(15,23,42,0.08), 0 1px 4px rgba(15,23,42,0.04);
+            --panel-alt: #f7f8fa;
+            --border: #dfe3e8;
+            --border-strong: #b9c0ca;
+            --accent: #0f766e;
+            --accent-strong: #115e59;
+            --accent-soft: #e6f4f1;
+            --coral: #e85d3f;
+            --bg: #f4f6f8;
+            --green: #128047;
+            --green-bg: #e9f8ef;
+            --green-border: rgba(18,128,71,0.22);
+            --red: #c7352c;
+            --red-bg: #fff0ee;
+            --red-border: rgba(199,53,44,0.22);
+            --amber: #b7791f;
+            --amber-bg: #fff7df;
+            --amber-border: rgba(183,121,31,0.25);
+            --blue: #2b66b1;
+            --blue-bg: #edf4ff;
+            --blue-border: rgba(43,102,177,0.22);
+            --r-sm: 4px;
+            --r-md: 6px;
+            --r-lg: 8px;
+            --shadow-sm: 0 1px 2px rgba(24,24,27,0.06);
+            --shadow-md: 0 10px 24px rgba(24,24,27,0.08);
     }}
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -875,113 +928,155 @@ def render_html_dashboard(
       line-height: 1.5;
     }}
     .site-header {{
-      background: var(--ink);
-      color: white;
-      padding: 0 24px;
+            background: rgba(255,255,255,0.94);
+            color: var(--ink);
+            padding: 0 24px;
       display: flex;
       align-items: center;
       gap: 12px;
-      height: 50px;
+            min-height: 46px;
       position: sticky;
       top: 0;
       z-index: 100;
-      box-shadow: 0 1px 0 rgba(255,255,255,0.06), 0 2px 8px rgba(0,0,0,0.25);
+            border-bottom: 1px solid rgba(223,227,232,0.9);
+            backdrop-filter: blur(14px);
     }}
     .site-header .brand {{
       font-weight: 700;
-      font-size: 0.8rem;
-      letter-spacing: 0.12em;
+            font-size: 0.82rem;
+            letter-spacing: 0.06em;
       text-transform: uppercase;
     }}
     .site-header .header-pill {{
-      font-size: 0.7rem;
-      font-weight: 600;
-      padding: 2px 9px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            padding: 3px 9px;
       border-radius: 999px;
-      background: rgba(255,255,255,0.12);
-      color: rgba(255,255,255,0.8);
+            background: var(--accent-soft);
+            color: var(--accent-strong);
     }}
     .site-header .run-meta {{
       font-size: 0.72rem;
-      color: rgba(255,255,255,0.38);
+            color: var(--muted);
       margin-left: auto;
     }}
-    main {{ max-width: 1200px; margin: 0 auto; padding: 24px 20px 64px; }}
-    section {{
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: var(--r-lg);
-      padding: 20px 22px;
-      margin-bottom: 14px;
-      box-shadow: var(--shadow-sm);
-    }}
+        main {{ max-width: 1320px; margin: 0 auto; padding: 16px 24px 72px; }}
+        section {{ margin-bottom: 12px; }}
     .hero {{
-      background: linear-gradient(135deg, #0f172a 0%, #1e293b 60%, #1e3a5f 100%);
-      color: white;
-      padding: 36px 28px;
-      border: none;
+            display: grid;
+            grid-template-columns: minmax(280px, 0.62fr) minmax(560px, 1.38fr);
+            align-items: stretch;
+            gap: 10px;
+            padding: 0;
     }}
-    .hero .eyebrow {{
+        .hero-copy {{
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--accent);
+            border-radius: var(--r-lg);
+            padding: 12px 16px;
+            box-shadow: var(--shadow-sm);
+        }}
+        .eyebrow {{
       font-size: 0.68rem;
       font-weight: 700;
-      letter-spacing: 0.2em;
+            letter-spacing: 0.1em;
       text-transform: uppercase;
-      color: #f97316;
-      margin-bottom: 10px;
+            color: var(--accent);
+            margin-bottom: 5px;
     }}
     .hero h1 {{
-      font-size: clamp(1.75rem, 4vw, 2.75rem);
+            font-size: 1.25rem;
       font-weight: 800;
-      color: white;
-      margin-bottom: 8px;
-      line-height: 1.1;
+            color: var(--ink);
+            margin-bottom: 5px;
+            line-height: 1.2;
     }}
-    .hero .lede {{ color: rgba(255,255,255,0.45); font-size: 0.85rem; }}
-    .hero-stats {{ display: flex; gap: 28px; margin-top: 22px; flex-wrap: wrap; }}
-    .stat-num {{ font-size: 2rem; font-weight: 800; color: white; line-height: 1; }}
+        .hero .lede {{ color: var(--muted); font-size: 0.8rem; }}
+        .hero .lede strong {{ color: var(--ink); }}
+        .hero-stats {{
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+        }}
+        .stat {{
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-top: 2px solid var(--accent);
+            border-radius: var(--r-lg);
+            padding: 10px 12px;
+            box-shadow: var(--shadow-sm);
+            min-height: 62px;
+        }}
+        .stat-num {{ font-size: 1.28rem; font-weight: 800; color: var(--ink); line-height: 1; }}
     .stat-label {{
-      font-size: 0.68rem;
+            font-size: 0.62rem;
       text-transform: uppercase;
-      letter-spacing: 0.09em;
-      color: rgba(255,255,255,0.4);
-      margin-top: 4px;
+            letter-spacing: 0.06em;
+            color: var(--muted);
+            margin-top: 5px;
     }}
-    .disclaimer {{ background: var(--amber-bg); border-color: var(--amber-border); }}
-    .disclaimer h2 {{ color: var(--amber); }}
-    .disclaimer .lede {{ color: #92400e; font-size: 0.85rem; }}
-    h2 {{ font-size: 1.0rem; font-weight: 700; color: var(--ink); margin-bottom: 12px; }}
-    h3 {{ font-size: 0.95rem; font-weight: 700; color: var(--ink); margin-bottom: 4px; }}
+        .notice {{
+            background: var(--amber-bg);
+            border-left: 4px solid var(--amber);
+            border-radius: var(--r-lg);
+            padding: 9px 14px;
+            color: #6f4e16;
+            font-size: 0.82rem;
+        }}
+        .notice strong {{ color: #7c4f0d; }}
+        .section-block, .panel {{
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: var(--r-lg);
+            padding: 13px 14px;
+            box-shadow: var(--shadow-sm);
+        }}
+        .panel-grid {{
+            display: grid;
+            grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.9fr);
+            gap: 14px;
+            margin-bottom: 12px;
+        }}
+        .panel-grid-three {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+        .panel-wide {{ min-width: 0; }}
+        .section-heading {{ position: relative; margin-bottom: 10px; padding-right: 120px; }}
+        .section-heading h2 {{ margin-bottom: 0; }}
+        .section-heading span {{ color: var(--muted); font-size: 0.78rem; white-space: nowrap; position: absolute; right: 0; top: 2px; }}
+        h2 {{ font-size: 1.0rem; font-weight: 750; color: var(--ink); margin-bottom: 12px; }}
+        h3 {{ font-size: 1.0rem; font-weight: 750; color: var(--ink); margin-bottom: 4px; line-height: 1.25; }}
     .lede {{ color: var(--muted); font-size: 0.85rem; }}
-    .track-pills {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .track-pills {{ display: flex; flex-wrap: wrap; gap: 7px; }}
     .track-pill {{
       display: inline-flex;
       align-items: center;
       gap: 7px;
-      padding: 5px 12px 5px 10px;
-      border-radius: 999px;
+            padding: 4px 10px 4px 9px;
+            border-radius: var(--r-lg);
       background: var(--panel-alt);
       border: 1px solid var(--border);
       font-size: 0.78rem;
-      color: var(--muted);
+            color: var(--ink);
     }}
     .track-pill .pc {{
       font-size: 0.72rem; font-weight: 700; padding: 1px 7px;
-      border-radius: 999px; background: var(--accent); color: white;
+            border-radius: 999px; background: var(--accent); color: white;
     }}
     .track-pill .pc-zero {{
       font-size: 0.72rem; font-weight: 600; padding: 1px 7px;
       border-radius: 999px; background: var(--border); color: var(--subtle);
     }}
+        .table-wrap {{ width: 100%; overflow-x: auto; }}
     table {{ width: 100%; border-collapse: collapse; font-size: 0.875rem; }}
-    thead {{ border-bottom: 2px solid var(--border); }}
+        thead {{ border-bottom: 1px solid var(--border-strong); }}
     th {{
-      padding: 7px 10px; text-align: left; color: var(--subtle);
+            padding: 8px 10px; text-align: left; color: var(--muted);
       font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 0.09em; white-space: nowrap;
+            letter-spacing: 0.08em; white-space: nowrap;
     }}
-    td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }}
+        td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }}
     tbody tr:last-child td {{ border-bottom: none; }}
-    tbody tr:hover td {{ background: rgba(15,23,42,0.025); }}
+        tbody tr:hover td {{ background: rgba(15,118,110,0.04); }}
     .val-pos {{ color: var(--green); font-weight: 600; }}
     .val-neg {{ color: var(--red); font-weight: 600; }}
     .verdict-robust {{ color: var(--green); font-weight: 700; }}
@@ -991,34 +1086,38 @@ def render_html_dashboard(
     .tier-medium {{ color: var(--amber); font-weight: 600; }}
     .tier-speculative {{ color: var(--subtle); }}
     .empty {{ color: var(--subtle); font-size: 0.875rem; padding: 4px 0; }}
+        .recommendation-section {{
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+        }}
     .recommendation-section > h2 {{
-      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 0.14em; color: var(--accent);
-      padding-bottom: 8px; border-bottom: 2px solid var(--accent-light);
-      margin-bottom: 6px;
+            font-size: 1.12rem;
+            font-weight: 800;
+            color: var(--ink);
+            margin-bottom: 4px;
     }}
-    .recommendation-section > .lede {{ margin-bottom: 14px; }}
+        .recommendation-section > .lede {{ margin-bottom: 10px; max-width: 780px; }}
     .recommendation-grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-      gap: 12px; margin-top: 12px;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 12px; margin-top: 10px;
     }}
     .rec-card {{
       background: var(--panel); border: 1px solid var(--border);
-      border-radius: var(--r-md); padding: 16px;
+            border-radius: var(--r-lg); padding: 14px;
       box-shadow: var(--shadow-sm); display: flex; flex-direction: column;
-      transition: box-shadow 0.15s, border-color 0.15s;
+            transition: box-shadow 0.15s, border-color 0.15s, transform 0.15s;
     }}
-    .rec-card:hover {{ box-shadow: var(--shadow-md); border-color: var(--border-strong); }}
-    .card-badges {{ display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }}
+        .rec-card:hover {{ box-shadow: var(--shadow-md); border-color: var(--border-strong); transform: translateY(-1px); }}
+        .card-badges {{ display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 11px; }}
     .badge {{
       display: inline-flex; align-items: center;
       padding: 2px 8px; border-radius: 999px;
       font-size: 0.66rem; font-weight: 700;
-      text-transform: uppercase; letter-spacing: 0.07em;
+            text-transform: uppercase; letter-spacing: 0.06em;
       background: var(--panel-alt); border: 1px solid var(--border); color: var(--muted);
     }}
-    .badge-rank {{ background: var(--ink); color: white; border-color: transparent; }}
+        .badge-rank {{ background: var(--accent-strong); color: white; border-color: transparent; }}
     .badge-tier-high {{ background: var(--green-bg); color: var(--green); border-color: var(--green-border); }}
     .badge-tier-medium {{ background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); }}
     .badge-tier-speculative {{ background: var(--panel-alt); color: var(--subtle); }}
@@ -1029,14 +1128,17 @@ def render_html_dashboard(
     .badge-aligned {{ background: var(--blue-bg); color: var(--blue); border-color: var(--blue-border); }}
     .badge-flagged {{ background: var(--amber-bg); color: var(--amber); border-color: var(--amber-border); }}
     .card-kicker {{ font-size: 0.78rem; color: var(--muted); margin-bottom: 12px; }}
-    .metric-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 0 0 10px; }}
+        .metric-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 0 0 10px; }}
     .metric {{
-      padding: 8px 10px; border-radius: var(--r-sm);
+            padding: 8px 10px; border-radius: var(--r-md);
       background: var(--panel-alt); border: 1px solid var(--border);
     }}
+        .metric-entry {{ grid-column: 1 / -1; background: var(--accent-soft); border-color: rgba(15,118,110,0.22); }}
+        .metric-priority {{ background: #f4fbf7; border-color: var(--green-border); }}
+        .metric-risk {{ background: #fff7f6; border-color: var(--red-border); }}
     .metric dt {{
       font-size: 0.64rem; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 0.09em; color: var(--subtle); margin-bottom: 2px;
+            letter-spacing: 0.08em; color: var(--subtle); margin-bottom: 2px;
     }}
     .metric dd {{ font-size: 0.9rem; font-weight: 700; color: var(--ink); word-break: break-word; }}
     .metric.m-pos dd {{ color: var(--green); }}
@@ -1047,11 +1149,19 @@ def render_html_dashboard(
     .card-copy.warning {{ color: var(--red); }}
     .card-copy.warning strong {{ color: var(--red); }}
     @media (max-width: 760px) {{
-      main {{ padding: 14px 12px 48px; }}
-      section {{ padding: 14px; border-radius: var(--r-md); overflow-x: auto; }}
-      table {{ min-width: 480px; }}
+            .site-header {{ padding: 0 14px; }}
+            main {{ padding: 12px 12px 48px; }}
+            .hero {{ grid-template-columns: 1fr; gap: 14px; padding-top: 10px; }}
+            .hero h1 {{ font-size: 1.35rem; }}
+            .hero-stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+            .panel-grid, .panel-grid-three {{ grid-template-columns: 1fr; }}
+            .section-block, .panel, .rec-card {{ padding: 14px; }}
+            .section-heading {{ padding-right: 0; }}
+            .section-heading span {{ position: static; display: block; margin-top: 3px; }}
+            table {{ min-width: 560px; }}
       .recommendation-grid {{ grid-template-columns: 1fr; }}
       .metric-grid {{ grid-template-columns: 1fr; }}
+            .metric-entry {{ grid-column: auto; }}
       th, td {{ padding: 6px 8px; }}
       .site-header .run-meta {{ display: none; }}
     }}

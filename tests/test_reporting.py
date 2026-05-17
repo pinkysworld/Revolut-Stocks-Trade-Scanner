@@ -56,6 +56,8 @@ def test_render_html_dashboard_includes_disclaimer_and_console_recommendations()
                     "asset_class": "stock",
                     "currency": "USD",
                     "price": 189.12,
+                    "close_at_scan": "188.00",
+                    "live_price_as_of": "12:03",
                     "hold_days": 10,
                     "expected_roi_pct": 5.4,
                     "predicted_net_eur": 7.8,
@@ -64,6 +66,9 @@ def test_render_html_dashboard_includes_disclaimer_and_console_recommendations()
                     "stop_loss_price": 184.2,
                     "risk_reward": 1.8,
                     "score": 7,
+                    "rsi": "64.5",
+                    "adx": "23.7",
+                    "regime": "1",
                     "signals": "Trend, breakout",
                     "market_note": "OPEN — place now",
                     "confidence_tier": "high",
@@ -89,7 +94,8 @@ def test_render_html_dashboard_includes_disclaimer_and_console_recommendations()
                     "name": "Bitcoin",
                     "asset_class": "crypto",
                     "currency": "USD",
-                    "entry_price": 65000.0,
+                    "entry_price": "65000.0",
+                    "close_at_scan": "64000.0",
                     "hold_days": 5,
                     "action": "BUY",
                     "notional_eur": 100.0,
@@ -101,14 +107,20 @@ def test_render_html_dashboard_includes_disclaimer_and_console_recommendations()
                 }
             ]
         },
+        refresh_secs=300,
     )
-    assert "Disclaimer" in html
-    assert "Educational and research use only" in html
-    assert "CONCRETE TRADING RECOMMENDATIONS" in html
+    assert "Educational use only" in html
+    assert "content=\"300\"" in html
+    assert "Trading Dashboard" in html
+    assert "Mixed swing" in html
     assert "Apple" in html
     assert "LIVE entry price" in html
+    assert "+0.60% vs scan" in html
+    assert "as of 12:03" in html
+    assert "64.5 / 23.7 / +1" in html
     assert "Signal score" in html
     assert "Active signals" in html
     assert "Full backtest" in html
-    assert "CRYPTO WEEKLY TRADE SUGGESTIONS" in html
+    assert "Crypto trade tickets" in html
+    assert "+1.56% vs scan" in html
     assert "Bitcoin" in html

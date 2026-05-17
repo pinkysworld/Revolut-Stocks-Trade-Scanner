@@ -6,10 +6,11 @@ A local trading scanner for the Revolut Germany instrument universe, centered ar
 
 - Scans stocks, ETFs, equity CFDs, index CFDs, commodity CFDs, and crypto.
 - Produces swing, week, daytrade, intraday, and crypto-specific recommendation tracks.
-- Uses cached yfinance downloads for faster reruns.
-- Includes backtests, train/test out-of-sample verdicts, and CSV exports.
-- Adds runtime JSON config, symbol override support, timestamped run snapshots, and an HTML dashboard.
+- Uses cached yfinance downloads plus enriched-indicator and sweep-result caches for faster reruns.
+- Includes backtests, 3-fold walk-forward out-of-sample verdicts, and CSV exports.
+- Adds runtime JSON config, symbol override support, timestamped run snapshots, and a compact HTML trading dashboard.
 - Writes rejection, data-quality, portfolio-plan, and run-summary reports for each scan.
+- Persists live TP/SL tracking state between restarts and can send Telegram or webhook alerts when TP/SL levels are hit.
 - Keeps only the maintained scanner in the working tree; legacy version snapshots now live in git history instead of separate tracked files.
 - Models Revolut Free-tier crypto fees at `1.99%` per side by default.
 - Uses fee-aware crypto move floors:
@@ -69,8 +70,32 @@ Run the test suite:
 - `data_quality_report.csv`: history health, stale bars, and override notes.
 - `portfolio_plan.csv`: portfolio guardrail decisions and estimated per-trade risk.
 - `run_summary.json`: machine-readable run metadata and output paths.
-- `dashboard.html`: static report with counts, top ideas, OOS verdicts, data issues, and rejection summary.
+- `dashboard.html`: compact trading dashboard with run stats, track counts, top ideas, risk guardrails, data issues, OOS verdicts, and recommendation cards.
+- `live_state.json`: saved live-tracking state used to preserve TP/SL status across scanner restarts.
 - `runs/<timestamp>_*`: timestamped snapshot copies of every generated report when snapshots are enabled.
+
+## Dashboard And Live Tracking
+
+The generated `dashboard.html` is designed as an operational scanner view rather than a marketing page. It highlights the current run, track coverage, top ideas, portfolio guardrails, OOS verdicts, and card-level trade details.
+
+In live mode, recommendation cards include:
+
+- live entry price drift versus the scan price, for example `+0.60% vs scan`
+- freshness timestamps such as `as of 12:03`
+- confidence, portfolio, TP/SL, signal, and backtest context
+- automatic browser refresh using the configured live refresh interval
+
+TP HIT and SL HIT transitions are persisted in `live_state.json`. If notification settings are configured, those transitions are also sent immediately through the existing Telegram or webhook integrations.
+
+## Local Caches
+
+The scanner uses `.yf_cache/` to avoid repeated Yahoo Finance work:
+
+- `.yf_cache/*.parquet`: raw daily or intraday downloads
+- `.yf_cache/enriched/*.parquet`: indicator-enriched DataFrames keyed by ticker, asset class, and last bar date
+- `.yf_cache/sweep/*.json`: cached sweep/backtest rows invalidated when the latest bar changes
+
+These cache files are local runtime artifacts and are not intended to be committed.
 
 ## Key Files
 
