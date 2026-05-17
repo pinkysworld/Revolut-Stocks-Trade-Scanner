@@ -3554,6 +3554,9 @@ def run_scan(iteration=0):
             rejection_rows,
             risk_summary,
             oos_results,
+            extra_track_rows={
+                "crypto_weekly_trade_suggestions": crypto_weekly_trade_suggestions,
+            },
         )
         _remember_output("dashboard", write_text_export(
             dashboard_html, OUTDIR, DASHBOARD_HTML, snapshot_dir=snapshot_dir))
