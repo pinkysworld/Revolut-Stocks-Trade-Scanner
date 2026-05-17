@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-05-17
+
+- Removed legacy `revolut_scanner_v*.py` snapshots from the working tree and standardized the repo on [revolut_scanner_v13.py](revolut_scanner_v13.py) as the only maintained entrypoint.
+- Updated README, architecture notes, and runbook instructions to reflect the single-entrypoint layout, extracted support modules, and current reporting outputs.
+
 ## 2026-05-16
 
 - Switched the crypto fee model to Revolut Free-tier pricing (`1.99%` per side).

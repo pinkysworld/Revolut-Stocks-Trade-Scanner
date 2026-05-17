@@ -17,9 +17,14 @@ crypto_intraday_recommendations.csv
 crypto_mean_reversion_recommendations.csv
 crypto_weekly_recommendations.csv
 crypto_weekly_trade_suggestions.csv
+data_quality_report.csv
+dashboard.html
 daytrade_recommendations.csv
 oos_verdict.csv
+portfolio_plan.csv
+rejection_report.csv
 recommendations.csv
+run_summary.json
 scan_results.csv
 stock_daytrade_recommendations.csv
 stock_intraday_recommendations.csv
@@ -27,6 +32,7 @@ stock_recommendations.csv
 stock_week_recommendations.csv
 sweep_results.csv
 week_recommendations.csv
+runs/
 
 # Local diagnostics
 .tmp_*.py

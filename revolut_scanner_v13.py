@@ -156,6 +156,7 @@ import os
 import sys
 import time
 import hashlib
+import traceback
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -165,6 +166,33 @@ try:
     from zoneinfo import ZoneInfo
 except Exception:
     ZoneInfo = None
+
+from scanner.runtime import (
+    apply_global_overrides,
+    collect_cli_overrides,
+    filter_assets,
+    load_json_config,
+    merge_runtime_overrides,
+    parse_cli_args,
+)
+from scanner.notifications import build_notification_message, send_notifications
+from scanner.quality import (
+    apply_symbol_overrides,
+    assess_history_quality,
+    load_symbol_overrides,
+    summarize_quality_rows,
+)
+from scanner.reporting import (
+    annotate_confidence_tiers,
+    build_rejection_report,
+    build_run_context,
+    build_run_summary,
+    render_html_dashboard,
+    write_dataframe_export,
+    write_json_export,
+    write_text_export,
+)
+from scanner.risk import apply_portfolio_limits
 
 # =================== USER CONFIG ===================
 STOCK_FEE_OPEN_EUR     = 1.0
@@ -196,6 +224,16 @@ CORR_MAX           = 0.75
 CORR_LOOKBACK_DAYS = 60
 OUTDIR             = "."
 INSTRUMENTS_CSV    = os.path.join(os.path.dirname(__file__), "revolut_instruments.csv")
+SYMBOL_OVERRIDES_JSON = os.path.join(os.path.dirname(__file__), "config", "symbol_overrides.json")
+RUN_LABEL          = ""
+RUNTIME_MAX_ASSETS = 0
+RUNTIME_ONLY_ASSET_CLASSES = []
+RUNTIME_ONLY_TICKERS = []
+REJECTION_REPORT_CSV = "rejection_report.csv"
+DATA_QUALITY_REPORT_CSV = "data_quality_report.csv"
+PORTFOLIO_PLAN_CSV = "portfolio_plan.csv"
+RUN_SUMMARY_JSON = "run_summary.json"
+DASHBOARD_HTML = "dashboard.html"
 
 # --- yfinance download cache / concurrency ---
 YF_CACHE_DIR              = os.path.join(os.path.dirname(__file__), ".yf_cache")
@@ -380,6 +418,19 @@ LIVE_REFRESH_MIN           = 15        # refresh every N minutes
 LIVE_FULL_SCAN_HOURS       = 4         # full re-scan every N hours, light refresh in between
 LIVE_UPDATE_THRESHOLD_PCT  = 0.30      # mark [UPDATED] if price moved more than this %
 MAX_LIVE_ITERATIONS        = 0         # 0 = unlimited; otherwise stop after N refreshes
+PORTFOLIO_LIMITS_ENABLED   = True
+PORTFOLIO_FILTER_RECOMMENDATIONS = False
+PORTFOLIO_MAX_TOTAL_RISK_EUR = 120.0
+PORTFOLIO_MAX_POSITIONS_TOTAL = 10
+PORTFOLIO_MAX_POSITIONS_PER_TRACK = 3
+PORTFOLIO_MAX_POSITIONS_PER_ASSET_CLASS = 4
+PORTFOLIO_MAX_CRYPTO_NOTIONAL_EUR = 300.0
+PORTFOLIO_MAX_CORRELATION = 0.85
+SNAPSHOT_RUNS              = True
+GENERATE_HTML_DASHBOARD    = True
+NOTIFY_WEBHOOK_URL         = ""
+TELEGRAM_BOT_TOKEN         = ""
+TELEGRAM_CHAT_ID           = ""
 
 # --- ANSI colors (set NO_COLOR=True or env NO_COLOR=1 to disable) ---
 NO_COLOR = bool(os.environ.get("NO_COLOR"))
@@ -3102,11 +3153,26 @@ def run_scan(iteration=0):
     """Run one full scan cycle. Called once at startup, then optionally
     every LIVE_FULL_SCAN_HOURS hours in live mode."""
     os.makedirs(OUTDIR, exist_ok=True)
+    run_context = build_run_context(OUTDIR, RUN_LABEL, iteration=iteration,
+                                    snapshot_runs=SNAPSHOT_RUNS)
     assets = load_assets()
+    symbol_overrides = load_symbol_overrides(SYMBOL_OVERRIDES_JSON)
+    assets, quality_rows = apply_symbol_overrides(assets, symbol_overrides)
+    assets = filter_assets(
+        assets,
+        only_asset_classes=RUNTIME_ONLY_ASSET_CLASSES,
+        only_tickers=RUNTIME_ONLY_TICKERS,
+        max_assets=RUNTIME_MAX_ASSETS,
+    )
+    asset_count = len(assets)
     crypto_count = sum(1 for a in assets if a[2] == "crypto")
     print(f"Loading {len(assets)} instruments ({crypto_count} crypto, {LOOKBACK} of daily history)...")
     if os.path.exists(INSTRUMENTS_CSV):
         print(f"Instrument universe loaded from {INSTRUMENTS_CSV}")
+    if symbol_overrides:
+        print(f"Symbol overrides loaded from {SYMBOL_OVERRIDES_JSON} ({len(symbol_overrides)} entries).")
+    if run_context["snapshot_dir"]:
+        print(f"Snapshot run directory: {run_context['snapshot_dir']}")
 
     if USE_REGIME_FILTER:
         regime_series = load_regime()
@@ -3132,6 +3198,11 @@ def run_scan(iteration=0):
 
     enriched, scores_map, day_scores_map, returns = {}, {}, {}, {}
     scan_rows, all_trades, bt_summary = [], [], []
+    output_files = {}
+
+    def _remember_output(key, path):
+        if path:
+            output_files[key] = path
 
     failed = []
     for ticker, name, cls, cur in assets:
@@ -3139,7 +3210,14 @@ def run_scan(iteration=0):
                              asset_class=cls, raw_df=daily_histories.get(ticker))
         if df is None:
             failed.append(f"{ticker}/{cls}")
+            quality_rows.append(
+                assess_history_quality(ticker, cls, None, name=name, currency=cur,
+                                       error="No usable history returned")
+            )
             continue
+        quality_rows.append(
+            assess_history_quality(ticker, cls, df, name=name, currency=cur)
+        )
         enriched[(ticker, cls)] = (df, cur, name)
         returns[(ticker, cls)] = df["ret1"].tail(CORR_LOOKBACK_DAYS)
         scores = precompute_scores(df, asset_class=cls)
@@ -3303,6 +3381,65 @@ def run_scan(iteration=0):
                                 crypto_notional=CRYPTO_NOTIONAL_EUR)
         refresh_intraday_prices(stock_intraday_recs, INTRADAY_STOP_LOSS_VOL_FRAC)
 
+    track_rows = {
+        "swing": recs,
+        "week": week_recs,
+        "stock_swing": stock_recs,
+        "stock_week": stock_week_recs,
+        "crypto_weekly": crypto_weekly,
+        "daytrade": daytrade_recs,
+        "stock_daytrade": stock_dt_recs,
+        "crypto_daytrade": crypto_dt_recs,
+        "crypto_mean_reversion": crypto_mr_recs,
+        "stock_intraday": stock_intraday_recs,
+        "crypto_intraday": crypto_intraday_recs,
+    }
+    track_rows = annotate_confidence_tiers(track_rows)
+    track_rows, portfolio_plan_rows, risk_summary = apply_portfolio_limits(
+        track_rows,
+        returns,
+        {
+            "enabled": PORTFOLIO_LIMITS_ENABLED,
+            "filter_recommendations": PORTFOLIO_FILTER_RECOMMENDATIONS,
+            "max_total_risk_eur": PORTFOLIO_MAX_TOTAL_RISK_EUR,
+            "max_positions_total": PORTFOLIO_MAX_POSITIONS_TOTAL,
+            "max_positions_per_track": PORTFOLIO_MAX_POSITIONS_PER_TRACK,
+            "max_positions_per_asset_class": PORTFOLIO_MAX_POSITIONS_PER_ASSET_CLASS,
+            "max_crypto_notional_eur": PORTFOLIO_MAX_CRYPTO_NOTIONAL_EUR,
+            "max_correlation": PORTFOLIO_MAX_CORRELATION,
+        },
+    )
+    recs = track_rows["swing"]
+    week_recs = track_rows["week"]
+    stock_recs = track_rows["stock_swing"]
+    stock_week_recs = track_rows["stock_week"]
+    crypto_weekly = track_rows["crypto_weekly"]
+    daytrade_recs = track_rows["daytrade"]
+    stock_dt_recs = track_rows["stock_daytrade"]
+    crypto_dt_recs = track_rows["crypto_daytrade"]
+    crypto_mr_recs = track_rows["crypto_mean_reversion"]
+    stock_intraday_recs = track_rows["stock_intraday"]
+    crypto_intraday_recs = track_rows["crypto_intraday"]
+
+    rejection_rows = build_rejection_report(
+        scan_rows,
+        track_rows,
+        robust_set=robust_set,
+        weak_set=weak_set,
+        allow_weak_classes=ALLOW_WEAK_CLASSES,
+        portfolio_plan_rows=portfolio_plan_rows,
+        config={
+            "MIN_SCORE_FOR_REC": MIN_SCORE_FOR_REC,
+            "DAYTRADE_SCORE_THRESHOLD": DAYTRADE_SCORE_THRESHOLD,
+            "CRYPTO_WEEKLY_MIN_SCORE": CRYPTO_WEEKLY_MIN_SCORE,
+            "CRYPTO_WEEKLY_MIN_PREDICTED_PCT": CRYPTO_WEEKLY_MIN_PREDICTED_PCT,
+            "CRYPTO_MR_RSI2_MAX": CRYPTO_MR_RSI2_MAX,
+            "STOCK_INTRADAY_SCORE_THRESHOLD": STOCK_INTRADAY_SCORE_THRESHOLD,
+            "CRYPTO_INTRADAY_SCORE_THRESHOLD": CRYPTO_INTRADAY_SCORE_THRESHOLD,
+        },
+    )
+    quality_summary = summarize_quality_rows(quality_rows)
+
     # ============== PRINT ALL TRACKS ==============
     # ----- Live-mode status tagging (NEW/UPDATED/TP HIT/SL HIT vs prior iter) -----
     if LIVE_MODE:
@@ -3329,6 +3466,7 @@ def run_scan(iteration=0):
         attach_market_fields(rows)
 
     crypto_weekly_trade_suggestions = build_crypto_weekly_trade_suggestions(crypto_weekly)
+    attach_market_fields(crypto_weekly_trade_suggestions)
 
     print_recommendations(recs, robust_set, weak_set)
     print_week_recommendations(week_recs)
@@ -3344,30 +3482,101 @@ def run_scan(iteration=0):
     print_crypto_intraday_recommendations(crypto_intraday_recs)
 
     # ============== CSV EXPORTS ==============
-    pd.DataFrame(scan_rows).to_csv(os.path.join(OUTDIR, "scan_results.csv"), index=False)
-    pd.DataFrame(all_trades).to_csv(os.path.join(OUTDIR, "backtest_trades.csv"), index=False)
-    pd.DataFrame(bt_summary).to_csv(os.path.join(OUTDIR, "backtest_summary.csv"), index=False)
-    sweep_df.to_csv(os.path.join(OUTDIR, "sweep_results.csv"), index=False)
-    pd.DataFrame(oos_results).to_csv(os.path.join(OUTDIR, "oos_verdict.csv"), index=False)
-    if recs:            pd.DataFrame(recs).to_csv(os.path.join(OUTDIR, "recommendations.csv"), index=False)
-    if week_recs:       pd.DataFrame(week_recs).to_csv(os.path.join(OUTDIR, "week_recommendations.csv"), index=False)
-    if stock_recs:      pd.DataFrame(stock_recs).to_csv(os.path.join(OUTDIR, "stock_recommendations.csv"), index=False)
-    if stock_week_recs: pd.DataFrame(stock_week_recs).to_csv(os.path.join(OUTDIR, "stock_week_recommendations.csv"), index=False)
-    if crypto_weekly:   pd.DataFrame(crypto_weekly).to_csv(os.path.join(OUTDIR, "crypto_weekly_recommendations.csv"), index=False)
-    pd.DataFrame(
-        crypto_weekly_trade_suggestions,
-        columns=CRYPTO_WEEKLY_TRADE_SUGGESTION_COLUMNS,
-    ).to_csv(os.path.join(OUTDIR, CRYPTO_WEEKLY_TRADE_SUGGESTIONS_CSV), index=False)
-    if daytrade_recs:   pd.DataFrame(daytrade_recs).to_csv(os.path.join(OUTDIR, "daytrade_recommendations.csv"), index=False)
-    if stock_dt_recs:   pd.DataFrame(stock_dt_recs).to_csv(os.path.join(OUTDIR, "stock_daytrade_recommendations.csv"), index=False)
-    if crypto_dt_recs:  pd.DataFrame(crypto_dt_recs).to_csv(os.path.join(OUTDIR, "crypto_daytrade_recommendations.csv"), index=False)
-    if crypto_mr_recs:  pd.DataFrame(crypto_mr_recs).to_csv(os.path.join(OUTDIR, "crypto_mean_reversion_recommendations.csv"), index=False)
-    if stock_intraday_recs:
-        pd.DataFrame(stock_intraday_recs).to_csv(
-            os.path.join(OUTDIR, "stock_intraday_recommendations.csv"), index=False)
-    if crypto_intraday_recs:
-        pd.DataFrame(crypto_intraday_recs).to_csv(
-            os.path.join(OUTDIR, "crypto_intraday_recommendations.csv"), index=False)
+    snapshot_dir = run_context["snapshot_dir"]
+    _remember_output("scan_results", write_dataframe_export(
+        pd.DataFrame(scan_rows), OUTDIR, "scan_results.csv", snapshot_dir=snapshot_dir))
+    _remember_output("backtest_trades", write_dataframe_export(
+        pd.DataFrame(all_trades), OUTDIR, "backtest_trades.csv", snapshot_dir=snapshot_dir))
+    _remember_output("backtest_summary", write_dataframe_export(
+        pd.DataFrame(bt_summary), OUTDIR, "backtest_summary.csv", snapshot_dir=snapshot_dir))
+    _remember_output("sweep_results", write_dataframe_export(
+        sweep_df, OUTDIR, "sweep_results.csv", snapshot_dir=snapshot_dir))
+    _remember_output("oos_verdict", write_dataframe_export(
+        pd.DataFrame(oos_results), OUTDIR, "oos_verdict.csv", snapshot_dir=snapshot_dir))
+    _remember_output("recommendations", write_dataframe_export(
+        pd.DataFrame(recs), OUTDIR, "recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("week_recommendations", write_dataframe_export(
+        pd.DataFrame(week_recs), OUTDIR, "week_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("stock_recommendations", write_dataframe_export(
+        pd.DataFrame(stock_recs), OUTDIR, "stock_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("stock_week_recommendations", write_dataframe_export(
+        pd.DataFrame(stock_week_recs), OUTDIR, "stock_week_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("crypto_weekly_recommendations", write_dataframe_export(
+        pd.DataFrame(crypto_weekly), OUTDIR, "crypto_weekly_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("crypto_weekly_trade_suggestions", write_dataframe_export(
+        pd.DataFrame(crypto_weekly_trade_suggestions, columns=CRYPTO_WEEKLY_TRADE_SUGGESTION_COLUMNS),
+        OUTDIR, CRYPTO_WEEKLY_TRADE_SUGGESTIONS_CSV, snapshot_dir=snapshot_dir))
+    _remember_output("daytrade_recommendations", write_dataframe_export(
+        pd.DataFrame(daytrade_recs), OUTDIR, "daytrade_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("stock_daytrade_recommendations", write_dataframe_export(
+        pd.DataFrame(stock_dt_recs), OUTDIR, "stock_daytrade_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("crypto_daytrade_recommendations", write_dataframe_export(
+        pd.DataFrame(crypto_dt_recs), OUTDIR, "crypto_daytrade_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("crypto_mean_reversion_recommendations", write_dataframe_export(
+        pd.DataFrame(crypto_mr_recs), OUTDIR, "crypto_mean_reversion_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("stock_intraday_recommendations", write_dataframe_export(
+        pd.DataFrame(stock_intraday_recs), OUTDIR, "stock_intraday_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("crypto_intraday_recommendations", write_dataframe_export(
+        pd.DataFrame(crypto_intraday_recs), OUTDIR, "crypto_intraday_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("rejection_report", write_dataframe_export(
+        pd.DataFrame(rejection_rows), OUTDIR, REJECTION_REPORT_CSV, snapshot_dir=snapshot_dir))
+    _remember_output("data_quality_report", write_dataframe_export(
+        pd.DataFrame(quality_rows), OUTDIR, DATA_QUALITY_REPORT_CSV, snapshot_dir=snapshot_dir))
+    _remember_output("portfolio_plan", write_dataframe_export(
+        pd.DataFrame(portfolio_plan_rows), OUTDIR, PORTFOLIO_PLAN_CSV, snapshot_dir=snapshot_dir))
+
+    run_summary = build_run_summary(
+        run_context,
+        track_rows,
+        quality_summary,
+        risk_summary,
+        rejection_rows,
+        output_files,
+        asset_count=asset_count,
+        failed_count=len(failed),
+    )
+    if GENERATE_HTML_DASHBOARD:
+        dashboard_html = render_html_dashboard(
+            run_summary,
+            track_rows,
+            quality_rows,
+            rejection_rows,
+            risk_summary,
+            oos_results,
+        )
+        _remember_output("dashboard", write_text_export(
+            dashboard_html, OUTDIR, DASHBOARD_HTML, snapshot_dir=snapshot_dir))
+
+    run_summary = build_run_summary(
+        run_context,
+        track_rows,
+        quality_summary,
+        risk_summary,
+        rejection_rows,
+        output_files,
+        asset_count=asset_count,
+        failed_count=len(failed),
+    )
+    _remember_output("run_summary", write_json_export(
+        run_summary, OUTDIR, RUN_SUMMARY_JSON, snapshot_dir=snapshot_dir))
+
+    notification_results = send_notifications(
+        build_notification_message(run_summary),
+        webhook_url=NOTIFY_WEBHOOK_URL,
+        telegram_token=TELEGRAM_BOT_TOKEN,
+        telegram_chat_id=TELEGRAM_CHAT_ID,
+    )
 
     print("\n" + BAR)
     print(" CSVs written to disk (one per recommendation track):")
@@ -3378,6 +3587,18 @@ def run_scan(iteration=0):
     print(f"   {CRYPTO_WEEKLY_TRADE_SUGGESTIONS_CSV}")
     print("   --- DAY (1-3 day) ---")
     print("   daytrade_recommendations.csv  stock_daytrade_recommendations.csv  crypto_daytrade_recommendations.csv")
+    print("   --- OPS / REPORTING ---")
+    print(f"   {REJECTION_REPORT_CSV}  {DATA_QUALITY_REPORT_CSV}  {PORTFOLIO_PLAN_CSV}  {RUN_SUMMARY_JSON}")
+    if GENERATE_HTML_DASHBOARD:
+        print(f"   {DASHBOARD_HTML}")
+    if run_context["snapshot_dir"]:
+        print(f"   Snapshot copy: {run_context['snapshot_dir']}")
+    if notification_results:
+        delivered = ", ".join(
+            f"{row['channel']}={'ok' if row['ok'] else 'failed'}"
+            for row in notification_results
+        )
+        print(f"   Notifications: {delivered}")
     print("   crypto_mean_reversion_recommendations.csv")
     print("   --- INTRADAY (hours, hourly bars) ---")
     print("   stock_intraday_recommendations.csv  crypto_intraday_recommendations.csv")
@@ -3390,9 +3611,15 @@ def run_scan(iteration=0):
     print(" Stock intraday: hourly bars only exist during exchange hours, so 24h hold ≈ next-day open.")
     print(" NOT financial advice.")
 
-def main():
+def main(argv=None):
     """Live-mode wrapper: run scan in a loop, refreshing every LIVE_REFRESH_MIN
     minutes until the user presses Ctrl+C. Set LIVE_MODE=False for a one-shot run."""
+    args = parse_cli_args(argv)
+    file_config = load_json_config(args.config)
+    cli_overrides = collect_cli_overrides(args)
+    overrides = merge_runtime_overrides(file_config, cli_overrides)
+    apply_global_overrides(globals(), overrides)
+
     if not LIVE_MODE:
         run_scan(iteration=0)
         return
@@ -3413,7 +3640,6 @@ def main():
                 raise
             except Exception as e:
                 print(f"{C.RED}Scan iteration {iteration} failed: {e}{C.RESET}")
-                import traceback
                 traceback.print_exc()
 
             if MAX_LIVE_ITERATIONS and iteration >= MAX_LIVE_ITERATIONS:

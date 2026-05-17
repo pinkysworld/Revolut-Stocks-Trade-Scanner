@@ -1,0 +1,13 @@
+{
+  "COMP-USD": {
+    "enabled": false,
+    "reason": "Example: disable unstable yfinance symbols"
+  },
+  "META": {
+    "ticker": "META",
+    "name": "Meta Platforms",
+    "asset_class": "stock",
+    "currency": "USD",
+    "reason": "Example: explicit remap"
+  }
+}
