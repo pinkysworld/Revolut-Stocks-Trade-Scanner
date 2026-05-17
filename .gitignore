@@ -1,0 +1,33 @@
+.DS_Store
+.venv/
+__pycache__/
+.yf_cache/
+*.pyc
+*.pyo
+*.pyd
+.python-version
+.vscode/
+.idea/
+
+# Generated scanner outputs
+backtest_summary.csv
+backtest_trades.csv
+crypto_daytrade_recommendations.csv
+crypto_intraday_recommendations.csv
+crypto_mean_reversion_recommendations.csv
+crypto_weekly_recommendations.csv
+crypto_weekly_trade_suggestions.csv
+daytrade_recommendations.csv
+oos_verdict.csv
+recommendations.csv
+scan_results.csv
+stock_daytrade_recommendations.csv
+stock_intraday_recommendations.csv
+stock_recommendations.csv
+stock_week_recommendations.csv
+sweep_results.csv
+week_recommendations.csv
+
+# Local diagnostics
+.tmp_*.py
+*.log

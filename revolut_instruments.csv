@@ -1,0 +1,251 @@
+ticker,name,asset_class,currency,enabled
+SAP.DE,SAP,stock,EUR,true
+SIE.DE,Siemens,stock,EUR,true
+ALV.DE,Allianz,stock,EUR,true
+BMW.DE,BMW,stock,EUR,true
+MBG.DE,Mercedes-Benz,stock,EUR,true
+VOW3.DE,Volkswagen Pref,stock,EUR,true
+DTE.DE,Deutsche Telekom,stock,EUR,true
+ADS.DE,Adidas,stock,EUR,true
+BAS.DE,BASF,stock,EUR,true
+BAYN.DE,Bayer,stock,EUR,true
+DBK.DE,Deutsche Bank,stock,EUR,true
+IFX.DE,Infineon,stock,EUR,true
+RHM.DE,Rheinmetall,stock,EUR,true
+RWE.DE,RWE,stock,EUR,true
+DHL.DE,DHL Group,stock,EUR,true
+AIR.DE,Airbus,stock,EUR,true
+PUM.DE,Puma,stock,EUR,true
+HEN3.DE,Henkel Pref,stock,EUR,true
+BEI.DE,Beiersdorf,stock,EUR,true
+CON.DE,Continental,stock,EUR,true
+HNR1.DE,Hannover Re,stock,EUR,true
+MRK.DE,Merck KGaA,stock,EUR,true
+MUV2.DE,Munich Re,stock,EUR,true
+PAH3.DE,Porsche Holding,stock,EUR,true
+P911.DE,Porsche AG,stock,EUR,true
+SHL.DE,Siemens Healthineers,stock,EUR,true
+SY1.DE,Symrise,stock,EUR,true
+VNA.DE,Vonovia,stock,EUR,true
+1COV.DE,Covestro,stock,EUR,false
+ENR.DE,Siemens Energy,stock,EUR,true
+BNP.PA,BNP Paribas,stock,EUR,true
+OR.PA,L'Oreal,stock,EUR,true
+MC.PA,LVMH,stock,EUR,true
+TTE.PA,TotalEnergies,stock,EUR,true
+SAN.PA,Sanofi,stock,EUR,true
+AI.PA,Air Liquide,stock,EUR,true
+SU.PA,Schneider Electric,stock,EUR,true
+ASML.AS,ASML,stock,EUR,true
+ADYEN.AS,Adyen,stock,EUR,true
+INGA.AS,ING,stock,EUR,true
+UNA.AS,Unilever,stock,EUR,true
+IBE.MC,Iberdrola,stock,EUR,true
+SAN.MC,Banco Santander,stock,EUR,true
+ITX.MC,Inditex,stock,EUR,true
+ENEL.MI,Enel,stock,EUR,true
+ISP.MI,Intesa Sanpaolo,stock,EUR,true
+RACE.MI,Ferrari,stock,EUR,true
+AAPL,Apple,stock,USD,true
+MSFT,Microsoft,stock,USD,true
+NVDA,NVIDIA,stock,USD,true
+GOOGL,Alphabet,stock,USD,true
+AMZN,Amazon,stock,USD,true
+META,Meta,stock,USD,true
+TSLA,Tesla,stock,USD,true
+AMD,AMD,stock,USD,true
+AVGO,Broadcom,stock,USD,true
+NFLX,Netflix,stock,USD,true
+JPM,JPMorgan,stock,USD,true
+KO,Coca-Cola,stock,USD,true
+COST,Costco,stock,USD,true
+BRK-B,Berkshire Hathaway,stock,USD,true
+V,Visa,stock,USD,true
+MA,Mastercard,stock,USD,true
+UNH,UnitedHealth,stock,USD,true
+LLY,Eli Lilly,stock,USD,true
+JNJ,Johnson & Johnson,stock,USD,true
+PG,Procter & Gamble,stock,USD,true
+HD,Home Depot,stock,USD,true
+BAC,Bank of America,stock,USD,true
+WMT,Walmart,stock,USD,true
+XOM,Exxon Mobil,stock,USD,true
+CVX,Chevron,stock,USD,true
+PEP,PepsiCo,stock,USD,true
+CSCO,Cisco,stock,USD,true
+ORCL,Oracle,stock,USD,true
+CRM,Salesforce,stock,USD,true
+ADBE,Adobe,stock,USD,true
+INTC,Intel,stock,USD,true
+QCOM,Qualcomm,stock,USD,true
+NOW,ServiceNow,stock,USD,true
+UBER,Uber,stock,USD,true
+PYPL,PayPal,stock,USD,true
+DIS,Disney,stock,USD,true
+NKE,Nike,stock,USD,true
+MCD,McDonald's,stock,USD,true
+ABBV,AbbVie,stock,USD,true
+ABNB,Airbnb,stock,USD,true
+ABT,Abbott Laboratories,stock,USD,true
+ACN,Accenture,stock,USD,true
+AMAT,Applied Materials,stock,USD,true
+AMGN,Amgen,stock,USD,true
+ANET,Arista Networks,stock,USD,true
+ARM,Arm Holdings ADR,stock,USD,true
+ASML,ASML ADR,stock,USD,true
+AXP,American Express,stock,USD,true
+BA,Boeing,stock,USD,true
+BABA,Alibaba ADR,stock,USD,true
+BKNG,Booking Holdings,stock,USD,true
+BLK,BlackRock,stock,USD,true
+BMY,Bristol Myers Squibb,stock,USD,true
+BX,Blackstone,stock,USD,true
+CAT,Caterpillar,stock,USD,true
+CMCSA,Comcast,stock,USD,true
+COIN,Coinbase,stock,USD,true
+COP,ConocoPhillips,stock,USD,true
+CRWD,CrowdStrike,stock,USD,true
+DE,Deere,stock,USD,true
+DELL,Dell Technologies,stock,USD,true
+DHR,Danaher,stock,USD,true
+ELV,Elevance Health,stock,USD,true
+ETN,Eaton,stock,USD,true
+FI,Fiserv,stock,USD,false
+GE,GE Aerospace,stock,USD,true
+GILD,Gilead Sciences,stock,USD,true
+GS,Goldman Sachs,stock,USD,true
+HON,Honeywell,stock,USD,true
+IBM,IBM,stock,USD,true
+ISRG,Intuitive Surgical,stock,USD,true
+LIN,Linde,stock,USD,true
+LOW,Lowe's,stock,USD,true
+LRCX,Lam Research,stock,USD,true
+MAR,Marriott,stock,USD,true
+MELI,MercadoLibre,stock,USD,true
+MRK,Merck & Co,stock,USD,true
+MS,Morgan Stanley,stock,USD,true
+MU,Micron Technology,stock,USD,true
+NEE,NextEra Energy,stock,USD,true
+NVO,Novo Nordisk ADR,stock,USD,true
+PANW,Palo Alto Networks,stock,USD,true
+PFE,Pfizer,stock,USD,true
+PLTR,Palantir,stock,USD,true
+PM,Philip Morris,stock,USD,true
+RTX,RTX,stock,USD,true
+SBUX,Starbucks,stock,USD,true
+SHOP,Shopify,stock,USD,true
+SNOW,Snowflake,stock,USD,true
+SPOT,Spotify,stock,USD,true
+T,AT&T,stock,USD,true
+TMO,Thermo Fisher Scientific,stock,USD,true
+TMUS,T-Mobile US,stock,USD,true
+TSM,Taiwan Semiconductor ADR,stock,USD,true
+TXN,Texas Instruments,stock,USD,true
+UPS,UPS,stock,USD,true
+VRTX,Vertex Pharmaceuticals,stock,USD,true
+WFC,Wells Fargo,stock,USD,true
+ZM,Zoom,stock,USD,true
+ZS,Zscaler,stock,USD,true
+ZTS,Zoetis,stock,USD,true
+ARKK,ARK Innovation ETF,etf,USD,true
+BIL,SPDR Bloomberg 1-3 Month T-Bill ETF,etf,USD,true
+DIA,SPDR Dow Jones Industrial Average ETF,etf,USD,true
+GLD,SPDR Gold Shares,etf,USD,true
+HYG,iShares iBoxx High Yield Corporate Bond ETF,etf,USD,true
+IAU,iShares Gold Trust,etf,USD,true
+IBIT,iShares Bitcoin Trust,etf,USD,true
+IWM,iShares Russell 2000 ETF,etf,USD,true
+LQD,iShares iBoxx Investment Grade Corporate Bond ETF,etf,USD,true
+QQQ,Invesco QQQ Trust,etf,USD,true
+SLV,iShares Silver Trust,etf,USD,true
+SPY,SPDR S&P 500 ETF,etf,USD,true
+TLT,iShares 20+ Year Treasury Bond ETF,etf,USD,true
+VTI,Vanguard Total Stock Market ETF,etf,USD,true
+XLE,Energy Select Sector SPDR Fund,etf,USD,true
+XLF,Financial Select Sector SPDR Fund,etf,USD,true
+XLK,Technology Select Sector SPDR Fund,etf,USD,true
+XLV,Health Care Select Sector SPDR Fund,etf,USD,true
+VWCE.DE,Vanguard FTSE All-World,etf,EUR,true
+EUNL.DE,iShares Core MSCI World,etf,EUR,true
+CSPX.AS,iShares Core S&P 500,etf,USD,true
+EQQQ.DE,Invesco Nasdaq-100,etf,EUR,true
+EXS1.DE,iShares Core DAX,etf,EUR,true
+VUAA.DE,Vanguard S&P 500,etf,EUR,true
+IS3N.DE,iShares Core MSCI EM IMI,etf,EUR,true
+IUSN.DE,iShares MSCI World Small Cap,etf,EUR,true
+SXR8.DE,iShares Core S&P 500 UCITS,etf,EUR,true
+QDVE.DE,iShares S&P 500 Information Technology Sector UCITS,etf,EUR,true
+IUSQ.DE,iShares MSCI ACWI UCITS,etf,EUR,true
+EXXT.DE,iShares Nasdaq 100 UCITS,etf,EUR,true
+2B76.DE,iShares Global Clean Energy UCITS,etf,EUR,true
+ISPA.DE,iShares STOXX Global Select Dividend 100 UCITS,etf,EUR,true
+LYMS.DE,Amundi MSCI World UCITS,etf,EUR,true
+MEUD.PA,Amundi STOXX Europe 600 UCITS,etf,EUR,true
+XMME.DE,Xtrackers MSCI Emerging Markets UCITS,etf,EUR,true
+XEON.DE,Xtrackers II EUR Overnight Rate Swap UCITS,etf,EUR,true
+AAPL,Apple CFD,equity_cfd,USD,true
+MSFT,Microsoft CFD,equity_cfd,USD,true
+NVDA,NVIDIA CFD,equity_cfd,USD,true
+GOOGL,Alphabet CFD,equity_cfd,USD,true
+AMZN,Amazon CFD,equity_cfd,USD,true
+META,Meta CFD,equity_cfd,USD,true
+TSLA,Tesla CFD,equity_cfd,USD,true
+AMD,AMD CFD,equity_cfd,USD,true
+AVGO,Broadcom CFD,equity_cfd,USD,true
+NFLX,Netflix CFD,equity_cfd,USD,true
+JPM,JPMorgan CFD,equity_cfd,USD,true
+BRK-B,Berkshire Hathaway CFD,equity_cfd,USD,true
+V,Visa CFD,equity_cfd,USD,true
+MA,Mastercard CFD,equity_cfd,USD,true
+LLY,Eli Lilly CFD,equity_cfd,USD,true
+UNH,UnitedHealth CFD,equity_cfd,USD,true
+JNJ,Johnson & Johnson CFD,equity_cfd,USD,true
+PG,Procter & Gamble CFD,equity_cfd,USD,true
+HD,Home Depot CFD,equity_cfd,USD,true
+BAC,Bank of America CFD,equity_cfd,USD,true
+WMT,Walmart CFD,equity_cfd,USD,true
+XOM,Exxon Mobil CFD,equity_cfd,USD,true
+CVX,Chevron CFD,equity_cfd,USD,true
+ORCL,Oracle CFD,equity_cfd,USD,true
+CRM,Salesforce CFD,equity_cfd,USD,true
+ADBE,Adobe CFD,equity_cfd,USD,true
+QCOM,Qualcomm CFD,equity_cfd,USD,true
+NOW,ServiceNow CFD,equity_cfd,USD,true
+UBER,Uber CFD,equity_cfd,USD,true
+DIS,Disney CFD,equity_cfd,USD,true
+MCD,McDonald's CFD,equity_cfd,USD,true
+PLTR,Palantir CFD,equity_cfd,USD,true
+COIN,Coinbase CFD,equity_cfd,USD,true
+ARM,Arm Holdings CFD,equity_cfd,USD,true
+CRWD,CrowdStrike CFD,equity_cfd,USD,true
+PANW,Palo Alto Networks CFD,equity_cfd,USD,true
+SAP.DE,SAP CFD,equity_cfd,EUR,true
+SIE.DE,Siemens CFD,equity_cfd,EUR,true
+ALV.DE,Allianz CFD,equity_cfd,EUR,true
+BMW.DE,BMW CFD,equity_cfd,EUR,true
+ASML.AS,ASML CFD,equity_cfd,EUR,true
+MBG.DE,Mercedes-Benz CFD,equity_cfd,EUR,true
+DTE.DE,Deutsche Telekom CFD,equity_cfd,EUR,true
+DBK.DE,Deutsche Bank CFD,equity_cfd,EUR,true
+RHM.DE,Rheinmetall CFD,equity_cfd,EUR,true
+MC.PA,LVMH CFD,equity_cfd,EUR,true
+OR.PA,L'Oreal CFD,equity_cfd,EUR,true
+TTE.PA,TotalEnergies CFD,equity_cfd,EUR,true
+SU.PA,Schneider Electric CFD,equity_cfd,EUR,true
+BNP.PA,BNP Paribas CFD,equity_cfd,EUR,true
+INGA.AS,ING CFD,equity_cfd,EUR,true
+^GSPC,S&P 500 CFD,index_cfd,USD,true
+^NDX,Nasdaq 100 CFD,index_cfd,USD,true
+^DJI,Dow Jones 30 CFD,index_cfd,USD,true
+^RUT,Russell 2000 CFD,index_cfd,USD,true
+^GDAXI,DAX 40 CFD,index_cfd,EUR,true
+^FTSE,FTSE 100 CFD,index_cfd,GBP,true
+^FCHI,CAC 40 CFD,index_cfd,EUR,true
+^N225,Nikkei 225 CFD,index_cfd,JPY,true
+^HSI,Hang Seng CFD,index_cfd,HKD,true
+GC=F,Gold CFD,commodity_cfd,USD,true
+SI=F,Silver CFD,commodity_cfd,USD,true
+CL=F,WTI Crude Oil CFD,commodity_cfd,USD,true
+BZ=F,Brent Crude Oil CFD,commodity_cfd,USD,true
+NG=F,Natural Gas CFD,commodity_cfd,USD,true
+HG=F,Copper CFD,commodity_cfd,USD,true
