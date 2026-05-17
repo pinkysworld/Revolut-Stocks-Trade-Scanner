@@ -155,6 +155,7 @@ Run:      python revolut_scanner_v13.py
 import os
 import sys
 import time
+import json
 import hashlib
 import traceback
 import yfinance as yf
@@ -418,6 +419,15 @@ LIVE_REFRESH_MIN           = 15        # refresh every N minutes
 LIVE_FULL_SCAN_HOURS       = 4         # full re-scan every N hours, light refresh in between
 LIVE_UPDATE_THRESHOLD_PCT  = 0.30      # mark [UPDATED] if price moved more than this %
 MAX_LIVE_ITERATIONS        = 0         # 0 = unlimited; otherwise stop after N refreshes
+LIVE_STATE_FILE            = "live_state.json"  # persists _LIVE_PRIOR across restarts
+
+# --- Enriched-DataFrame and sweep caches ---
+ENRICHED_CACHE_DIR = os.path.join(YF_CACHE_DIR, "enriched")
+SWEEP_CACHE_DIR    = os.path.join(YF_CACHE_DIR, "sweep")
+
+# --- Walk-forward OOS (replaces single 70/30 split when enabled) ---
+USE_WALK_FORWARD   = True   # use rolling K-fold walk-forward for OOS validation
+WALK_FORWARD_FOLDS = 3      # number of test windows
 PORTFOLIO_LIMITS_ENABLED   = True
 PORTFOLIO_FILTER_RECOMMENDATIONS = False
 PORTFOLIO_MAX_TOTAL_RISK_EUR = 120.0
@@ -1086,6 +1096,24 @@ def overnight_cost(asset_class, notional, currency, days):
     return notional * (base + CFD_MARKUP) * days / 360.0
 
 # =================== SCORING ===================
+# --- Shared signal helpers (used across swing / daytrade / intraday scorers) ---
+def _score_regime(last, label_bull="macro_bullish", label_bear="macro_bearish"):
+    """Return (score_delta, signals) for the macro regime signal."""
+    score, sig = 0, []
+    if last["Regime"] == 1:    score += 1; sig.append(label_bull)
+    elif last["Regime"] == -1: score -= 1; sig.append(label_bear)
+    return score, sig
+
+def _score_adx(last, trend_thr=25, chop_thr=18,
+               trend_label="adx_rising_trend", chop_label="no_trend_adx"):
+    """Return (score_delta, signals) for the ADX trend-strength signal."""
+    score, sig = 0, []
+    if last["ADX"] > trend_thr and last["ADX"] > last["ADXprev"]:
+        score += 1; sig.append(trend_label)
+    elif last["ADX"] < chop_thr:
+        score -= 1; sig.append(chop_label)
+    return score, sig
+
 CRIT_COLS = ["Close","Open","High","Low","SMA20","SMA50","SMA200",
              "EMA8","EMA21","RSI","MACD","MACDsig","MACDhist",
              "ATR","ATRpct","BBL","BBH","BBWidth","BBWidthRank","BBWidthSlope",
@@ -1146,12 +1174,10 @@ def compute_score(last, prev, asset_class=None):
     if 0.005 < last["ret5"] < 0.06:                       score += 1; sig.append("healthy_5d_momentum")
     if last["ret20"] < -0.12:                             score -= 1; sig.append("weak_20d_trend")
     if last["ATRpct"] > 0.08:                             score -= 1; sig.append("very_high_volatility")
-    if last["ADX"] > 25 and last["ADX"] > last["ADXprev"]:
-        score += 1; sig.append("adx_rising_trend")
-    elif last["ADX"] < 18:
-        score -= 1; sig.append("no_trend_adx")
-    if last["Regime"] == 1:                                score += 1; sig.append("macro_bullish")
-    elif last["Regime"] == -1:                             score -= 1; sig.append("macro_bearish")
+    adx_s, adx_sig = _score_adx(last)
+    score += adx_s; sig.extend(adx_sig)
+    reg_s, reg_sig = _score_regime(last)
+    score += reg_s; sig.extend(reg_sig)
     # Crypto-specific: relative strength vs BTC (signals named differently
     # so users can see the difference in the output's "Active signals" line)
     if asset_class == "crypto" and USE_BTC_RELATIVE_STRENGTH:
@@ -1196,10 +1222,10 @@ def compute_daytrade_score(last, prev):
     if last["ATRpct"] < 0.015:                            score -= 1; sig.append("too_quiet")
     if last["ATRpct"] > 0.09:                             score -= 1; sig.append("too_volatile")
     if last["ret1"] > 0.06 or last["RSI"] > 82:           score -= 2; sig.append("overextended")
-    if last["ADX"] > 22:                                  score += 1; sig.append("adx_trending")
-    elif last["ADX"] < 15:                                score -= 1; sig.append("adx_chop")
-    if last["Regime"] == 1:                               score += 1; sig.append("macro_bullish")
-    elif last["Regime"] == -1:                            score -= 1; sig.append("macro_bearish")
+    adx_s, adx_sig = _score_adx(last, trend_thr=22, chop_thr=15, trend_label="adx_trending", chop_label="adx_chop")
+    score += adx_s; sig.extend(adx_sig)
+    reg_s, reg_sig = _score_regime(last)
+    score += reg_s; sig.extend(reg_sig)
     return score, sig
 
 def precompute_daytrade_scores(df):
@@ -1241,12 +1267,10 @@ def compute_intraday_score(last, prev):
     if last["ATRpct"] < 0.003:                            score -= 1; sig.append("too_quiet_h")
     if last["ATRpct"] > 0.04:                             score -= 1; sig.append("too_choppy_h")
     if last["RSI"] > 82 or last["ret1"] > 0.05:           score -= 2; sig.append("h_overextended")
-    if last["ADX"] > 25 and last["ADX"] > last["ADXprev"]:
-        score += 1; sig.append("hourly_adx_rising")
-    elif last["ADX"] < 15:
-        score -= 1; sig.append("hourly_adx_chop")
-    if last["Regime"] == 1:                                score += 1; sig.append("daily_macro_bull")
-    elif last["Regime"] == -1:                             score -= 1; sig.append("daily_macro_bear")
+    adx_s, adx_sig = _score_adx(last, trend_label="hourly_adx_rising", chop_label="hourly_adx_chop")
+    score += adx_s; sig.extend(adx_sig)
+    reg_s, reg_sig = _score_regime(last, label_bull="daily_macro_bull", label_bear="daily_macro_bear")
+    score += reg_s; sig.extend(reg_sig)
     return score, sig
 
 def precompute_intraday_scores(df):
@@ -1268,13 +1292,29 @@ def add_bollinger_squeeze_features(df):
     df["BBWidthSlope"] = df["BBWidth"] / df["BBWidth"].shift(5) - 1
     return df
 
+def _enriched_cache_path(ticker, asset_class, last_date_str):
+    safe = ticker.replace("/", "_").replace("^", "")
+    return os.path.join(ENRICHED_CACHE_DIR, f"{safe}_{asset_class}_{last_date_str}.parquet")
+
 def load_and_enrich(ticker, regime_series=None, btc_regime_series=None,
                     btc_close=None, asset_class=None, raw_df=None):
-    df = raw_df.copy() if raw_df is not None else download_history(ticker, LOOKBACK, "1d")
-    if df is None or df.empty or len(df) < 220:
+    raw = raw_df.copy() if raw_df is not None else download_history(ticker, LOOKBACK, "1d")
+    if raw is None or raw.empty or len(raw) < 220:
         return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    # Check enriched cache (keyed on ticker + asset_class + last bar date)
+    if not DISABLE_YF_CACHE:
+        try:
+            last_date_str = pd.Timestamp(raw.index[-1]).strftime("%Y%m%d")
+            cpath = _enriched_cache_path(ticker, asset_class or "na", last_date_str)
+            if os.path.exists(cpath):
+                cached = pd.read_parquet(cpath)
+                if len(cached) >= len(raw) - 2:
+                    return cached
+        except Exception:
+            pass
+    df = raw.copy()
     c = df["Close"]
     df["EMA8"], df["EMA21"] = ema(c, 8), ema(c, 21)
     df["SMA20"], df["SMA50"], df["SMA200"] = sma(c, 20), sma(c, 50), sma(c, 200)
@@ -1319,6 +1359,15 @@ def load_and_enrich(ticker, regime_series=None, btc_regime_series=None,
     else:
         df["vs_btc_7d"]  = 0.0
         df["vs_btc_30d"] = 0.0
+    # Save enriched DataFrame to cache
+    if not DISABLE_YF_CACHE:
+        try:
+            last_date_str = pd.Timestamp(df.index[-1]).strftime("%Y%m%d")
+            cpath = _enriched_cache_path(ticker, asset_class or "na", last_date_str)
+            os.makedirs(ENRICHED_CACHE_DIR, exist_ok=True)
+            df.to_parquet(cpath)
+        except Exception:
+            pass
     return df
 
 def load_and_enrich_intraday(ticker, regime_series=None, raw_df=None):
@@ -1608,13 +1657,34 @@ def trade_levels(price, vol_pct, predicted_move_pct, sl_vol_frac, min_rr=MIN_RR_
     return sl_price, tp_price, rr
 
 # =================== LIVE-PRICE REFRESH ===================
+def _batch_fetch_prices(recs, price_key="price"):
+    """Fetch live prices for all recs in parallel. Returns {ticker: price}."""
+    pairs = list({r["ticker"]: r.get(price_key, 0) for r in recs}.items())
+    results = {}
+    def _fetch(ticker, fallback):
+        return ticker, get_live_price(ticker, fallback)
+    with ThreadPoolExecutor(max_workers=min(len(pairs), YF_DOWNLOAD_MAX_WORKERS)) as ex:
+        futures = {ex.submit(_fetch, t, f): t for t, f in pairs}
+        for fut in as_completed(futures):
+            try:
+                ticker, price = fut.result()
+                results[ticker] = price
+            except Exception:
+                pass
+    return results
+
 def refresh_swing_prices(recs, sl_vol_frac=STOP_LOSS_VOL_FRAC,
                          crypto_notional=None, stock_notional=None):
+    if not recs:
+        return recs
+    live_prices = _batch_fetch_prices(recs)
+    ts = datetime.now().strftime("%H:%M")
     for r in recs:
         scan_close = r["price"]
-        live = get_live_price(r["ticker"], scan_close)
+        live = live_prices.get(r["ticker"], scan_close)
         r["close_at_scan"] = scan_close
         r["price"] = live
+        r["live_price_as_of"] = ts
         cls = r["asset_class"]
         if cls == "crypto" and crypto_notional:
             notional = r.get("crypto_notional", r.get("notional", crypto_notional))
@@ -1653,11 +1723,16 @@ def refresh_swing_prices(recs, sl_vol_frac=STOP_LOSS_VOL_FRAC,
 
 def refresh_daytrade_prices(recs, sl_vol_frac=DAYTRADE_STOP_LOSS_VOL_FRAC,
                             stock_notional=None, crypto_notional=None):
+    if not recs:
+        return recs
+    live_prices = _batch_fetch_prices(recs)
+    ts = datetime.now().strftime("%H:%M")
     for r in recs:
         scan_close = r["price"]
-        live = get_live_price(r["ticker"], scan_close)
+        live = live_prices.get(r["ticker"], scan_close)
         r["close_at_scan"] = scan_close
         r["price"] = live
+        r["live_price_as_of"] = ts
         cls = r["asset_class"]
         if stock_notional and cls in ("stock", "etf"):
             units = max(1, int(round(stock_notional / live)))
@@ -1687,11 +1762,16 @@ def refresh_daytrade_prices(recs, sl_vol_frac=DAYTRADE_STOP_LOSS_VOL_FRAC,
 
 def refresh_intraday_prices(recs, sl_vol_frac=INTRADAY_STOP_LOSS_VOL_FRAC,
                             crypto_notional=None):
+    if not recs:
+        return recs
+    live_prices = _batch_fetch_prices(recs)
+    ts = datetime.now().strftime("%H:%M")
     for r in recs:
         scan_close = r["price"]
-        live = get_live_price(r["ticker"], scan_close)
+        live = live_prices.get(r["ticker"], scan_close)
         r["close_at_scan"] = scan_close
         r["price"] = live
+        r["live_price_as_of"] = ts
         cls = r["asset_class"]
         if cls == "crypto" and crypto_notional:
             notional = r.get("crypto_notional", r.get("intraday_notional", crypto_notional))
@@ -3102,16 +3182,67 @@ def print_stock_intraday_recommendations(recs):
         print(f"     Hourly test split:   {int(r['intraday_test_trades'])} trades, {r['intraday_test_win_rate']:.1f}% win rate, avg {r['intraday_test_avg']:+.2f}%")
 
 # =================== LIVE-MODE STATE ===================
-_LIVE_PRIOR = {}  # key=(track, ticker) → previous price (for [UPDATED]/[TP HIT]/[SL HIT] detection)
+_LIVE_PRIOR = {}  # key=(track, ticker) → previous price / SL / TP / status
+
+def _live_state_path():
+    return os.path.join(OUTDIR, LIVE_STATE_FILE)
+
+def _load_live_state():
+    """Restore _LIVE_PRIOR from disk so TP/SL tracking survives restarts."""
+    global _LIVE_PRIOR
+    path = _live_state_path()
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path) as f:
+            raw = json.load(f)  # list of [k0, k1, value]
+        _LIVE_PRIOR = {(item[0], item[1]): item[2] for item in raw}
+    except Exception:
+        pass
+
+def _save_live_state():
+    """Persist _LIVE_PRIOR to disk."""
+    try:
+        os.makedirs(OUTDIR, exist_ok=True)
+        data = [[k[0], k[1], v] for k, v in _LIVE_PRIOR.items()]
+        with open(_live_state_path(), "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+# ---- Instant alerts for TP/SL hits ----
+_PENDING_INSTANT_ALERTS: list = []
+
+def _flush_instant_alerts():
+    """Send any queued TP HIT / SL HIT alerts and clear the queue."""
+    global _PENDING_INSTANT_ALERTS
+    alerts = _PENDING_INSTANT_ALERTS
+    _PENDING_INSTANT_ALERTS = []
+    if not alerts:
+        return
+    if not NOTIFY_WEBHOOK_URL and not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return
+    for a in alerts:
+        icon = "🎯" if a["status"] == "TP HIT" else "🛑"
+        msg = (f"{icon} {a['status']}: {a['name']} ({a['ticker']}) "
+               f"[{a['track'].upper()}] @ {a['price']:.6g}")
+        send_notifications(
+            msg,
+            webhook_url=NOTIFY_WEBHOOK_URL,
+            telegram_token=TELEGRAM_BOT_TOKEN,
+            telegram_chat_id=TELEGRAM_CHAT_ID,
+        )
 
 def _tag_recs_live(track_key_prefix, recs, price_key="price",
                    sl_key="stop_loss_price", tp_key="take_profit_price"):
     """Tag each rec with NEW/UPDATED/TP HIT/SL HIT vs the prior live iteration."""
+    global _PENDING_INSTANT_ALERTS
     for r in recs:
         key = (track_key_prefix, r["ticker"])
         prior = _LIVE_PRIOR.get(key)
         prior_sl = _LIVE_PRIOR.get((track_key_prefix + "_sl", r["ticker"]))
         prior_tp = _LIVE_PRIOR.get((track_key_prefix + "_tp", r["ticker"]))
+        prior_status = _LIVE_PRIOR.get((track_key_prefix + "_status", r["ticker"]))
         live = r.get(price_key, 0)
         if prior is None:
             r["live_status"] = "NEW"
@@ -3123,7 +3254,17 @@ def _tag_recs_live(track_key_prefix, recs, price_key="price",
             r["live_status"] = "UPDATED"
         else:
             r["live_status"] = "UNCHANGED"
+        # Queue instant alert when TP/SL is hit for the first time this session
+        if r["live_status"] in ("TP HIT", "SL HIT") and prior_status != r["live_status"]:
+            _PENDING_INSTANT_ALERTS.append({
+                "track": track_key_prefix,
+                "ticker": r["ticker"],
+                "name": r.get("name", r["ticker"]),
+                "status": r["live_status"],
+                "price": live,
+            })
         _LIVE_PRIOR[key] = live
+        _LIVE_PRIOR[(track_key_prefix + "_status", r["ticker"])] = r["live_status"]
         if r.get(sl_key) is not None: _LIVE_PRIOR[(track_key_prefix + "_sl", r["ticker"])] = r[sl_key]
         if r.get(tp_key) is not None: _LIVE_PRIOR[(track_key_prefix + "_tp", r["ticker"])] = r[tp_key]
 
@@ -3219,6 +3360,32 @@ def run_scan(iteration=0):
     scan_rows.sort(key=lambda x: x["predicted_net_eur"], reverse=True)
     BAR = "─" * 135
 
+    # ============== PARAMETER SWEEP CACHE HELPERS ==============
+    def _sweep_cache_path(tk, cls, last_date_str):
+        safe = tk.replace("/", "_").replace("^", "")
+        wf_tag = "wf" if USE_WALK_FORWARD else "sp"
+        return os.path.join(SWEEP_CACHE_DIR, f"{safe}_{cls}_{last_date_str}_{wf_tag}.json")
+
+    def _load_sweep_cache(tk, cls, last_date_str):
+        if DISABLE_YF_CACHE:
+            return None
+        path = _sweep_cache_path(tk, cls, last_date_str)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def _save_sweep_cache(tk, cls, last_date_str, rows):
+        try:
+            os.makedirs(SWEEP_CACHE_DIR, exist_ok=True)
+            with open(_sweep_cache_path(tk, cls, last_date_str), "w") as f:
+                json.dump(rows, f)
+        except Exception:
+            pass
+
     # ============== FULL CURRENT SCAN ==============
     print(_section_header(
         f"Revolut Bullish Scanner — {datetime.now():%Y-%m-%d %H:%M}  │  "
@@ -3235,20 +3402,47 @@ def run_scan(iteration=0):
               f"{r['breakeven_pct']:>7.2f}{r['predicted_move_pct']:>7.2f}")
 
     # ============== PARAMETER SWEEP + OOS VERDICT ==============
-    print("\n" + BAR); print(" PARAMETER SWEEP — TRAIN (70%) / TEST (30%)"); print(BAR)
+    sweep_label = "WALK-FORWARD ({} folds)".format(WALK_FORWARD_FOLDS) if USE_WALK_FORWARD else "TRAIN (70%) / TEST (30%)"
+    print("\n" + BAR); print(f" PARAMETER SWEEP — {sweep_label}"); print(BAR)
     sweep_rows = []
     for (tk, cls), (df, cur, name) in enriched.items():
         scores = scores_map[(tk, cls)]
         n = len(df); warmup = 200
         if n - warmup < 30: continue
-        split = warmup + int((n - warmup) * TRAIN_FRACTION)
+        last_date_str = pd.Timestamp(df.index[-1]).strftime("%Y%m%d")
+        cached = _load_sweep_cache(tk, cls, last_date_str)
+        if cached is not None:
+            sweep_rows.extend(cached)
+            continue
+        ticker_sweep_rows = []
         for thr in SWEEP_THRESHOLDS:
             for hold in SWEEP_HOLDS:
-                train = simulate(df, scores, cls, cur, thr, hold, warmup, split)
-                test  = simulate(df, scores, cls, cur, thr, hold, split, n)
                 full  = simulate(df, scores, cls, cur, thr, hold, warmup, n)
-                ts, vs, fs = summarize(train), summarize(test), summarize(full)
-                sweep_rows.append({
+                fs = summarize(full)
+                if USE_WALK_FORWARD and WALK_FORWARD_FOLDS >= 2:
+                    # K-fold walk-forward: pool all test trades across folds
+                    fold_size = max(hold + 1, (n - warmup) // (WALK_FORWARD_FOLDS + 1))
+                    all_test_trades = []
+                    last_train_end = warmup
+                    for k in range(WALK_FORWARD_FOLDS):
+                        fold_train_end = warmup + (k + 1) * fold_size
+                        fold_test_end  = min(warmup + (k + 2) * fold_size, n)
+                        if fold_test_end - fold_train_end < hold + 1:
+                            continue
+                        fold_test = simulate(df, scores, cls, cur, thr, hold,
+                                            fold_train_end, fold_test_end)
+                        all_test_trades.extend(fold_test)
+                        last_train_end = fold_train_end
+                    vs = summarize(all_test_trades)
+                    # Train stats from period up to last fold boundary
+                    train = simulate(df, scores, cls, cur, thr, hold, warmup, last_train_end or (warmup + int((n - warmup) * 0.75)))
+                    ts = summarize(train)
+                else:
+                    split = warmup + int((n - warmup) * TRAIN_FRACTION)
+                    train = simulate(df, scores, cls, cur, thr, hold, warmup, split)
+                    test  = simulate(df, scores, cls, cur, thr, hold, split, n)
+                    ts, vs = summarize(train), summarize(test)
+                ticker_sweep_rows.append({
                     "ticker": tk, "name": name, "asset_class": cls,
                     "oos_asset_class": oos_asset_class_for_ticker(tk, cls),
                     "threshold": thr, "hold_days": hold,
@@ -3259,6 +3453,8 @@ def run_scan(iteration=0):
                     "full_n": fs["n"], "full_win": fs["win_rate"],
                     "full_avg": fs["avg"], "full_total": fs["total"],
                 })
+        sweep_rows.extend(ticker_sweep_rows)
+        _save_sweep_cache(tk, cls, last_date_str, ticker_sweep_rows)
     sweep_df = pd.DataFrame(sweep_rows)
 
     print("\n  OOS VERDICT — best train params vs. unseen test data")
@@ -3438,6 +3634,8 @@ def run_scan(iteration=0):
                        sl_key="intraday_stop_loss_price", tp_key="intraday_take_profit_price")
         _tag_recs_live("crypto_intra", crypto_intraday_recs,
                        sl_key="intraday_stop_loss_price", tp_key="intraday_take_profit_price")
+        _save_live_state()
+        _flush_instant_alerts()
 
     for rows in (recs, week_recs, stock_recs, stock_week_recs,
                  crypto_weekly, daytrade_recs, stock_dt_recs, crypto_dt_recs,
@@ -3536,6 +3734,7 @@ def run_scan(iteration=0):
             extra_track_rows={
                 "crypto_weekly_trade_suggestions": crypto_weekly_trade_suggestions,
             },
+            refresh_secs=(LIVE_REFRESH_MIN * 60) if LIVE_MODE else 0,
         )
         _remember_output("dashboard", write_text_export(
             dashboard_html, OUTDIR, DASHBOARD_HTML, snapshot_dir=snapshot_dir))
@@ -3586,6 +3785,20 @@ def run_scan(iteration=0):
     print("   stock_intraday_recommendations.csv  crypto_intraday_recommendations.csv")
     print("   --- 2-week swing ---")
     print("   recommendations.csv  stock_recommendations.csv")
+    # ============== REJECTION REASON SUMMARY ==============
+    if rejection_rows:
+        from collections import Counter as _Counter
+        _rej_counts = _Counter(
+            str(r.get("reason", "unknown"))
+            for r in rejection_rows if not r.get("accepted")
+        )
+        if _rej_counts:
+            total_rejected = sum(_rej_counts.values())
+            top_reasons = ", ".join(
+                f"{cnt}× {reason}" for reason, cnt in _rej_counts.most_common(5)
+            )
+            print(f"\n Rejection summary: {total_rejected} dropped — {top_reasons}")
+
     print()
     print(" Reminder: crypto recommendations use a €{:.0f} base size and scale down when ATR% is high.".format(CRYPTO_NOTIONAL_EUR))
     print(f" Revolut Free crypto fees are configured at {CRYPTO_FEE_PCT*100:.2f}%/side; lower CRYPTO_FEE_PCT only if you have Premium.")
@@ -3606,6 +3819,7 @@ def main(argv=None):
         run_scan(iteration=0)
         return
 
+    _load_live_state()
     print(f"\n{C.BOLD}{C.CYAN}LIVE MODE ON — refresh every {LIVE_REFRESH_MIN} min. "
           f"Ctrl+C to stop.{C.RESET}\n")
     iteration = 0

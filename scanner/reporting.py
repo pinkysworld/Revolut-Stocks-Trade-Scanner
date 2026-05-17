@@ -252,9 +252,21 @@ def _recommendation_metric_rows(track_name: str, row: Mapping[str, Any]) -> list
     currency = _first_text(row, "currency") or "EUR"
     metrics = [
         ("Market", _first_text(row, "market_note", "market_status") or "n/a"),
-        ("LIVE entry price", _format_price(row.get("price", row.get("entry_price")), currency, decimals=6 if row.get("asset_class") == "crypto" else 4)),
-        (_hold_metric_label(track_name), _hold_label(row)),
     ]
+    # LIVE entry price with optional drift-from-scan and freshness timestamp
+    decimals = 6 if row.get("asset_class") == "crypto" else 4
+    raw_price = row.get("price", row.get("entry_price"))
+    scan_price = row.get("close_at_scan")
+    price_str = _format_price(raw_price, currency, decimals=decimals)
+    if scan_price and raw_price and scan_price > 0:
+        drift = (raw_price / scan_price - 1) * 100
+        if abs(drift) >= 0.05:
+            price_str = f"{price_str} ({drift:+.2f}% vs scan)"
+    as_of = row.get("live_price_as_of")
+    if as_of:
+        price_str = f"{price_str}  ·  as of {as_of}"
+    metrics.append(("LIVE entry price", price_str))
+    metrics.append((_hold_metric_label(track_name), _hold_label(row)))
 
     if track_name == "crypto_weekly_trade_suggestions":
         metrics.extend([
@@ -726,6 +738,7 @@ def render_html_dashboard(
     risk_summary: Mapping[str, Any],
     oos_results: Sequence[Mapping[str, Any]],
     extra_track_rows: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    refresh_secs: int = 0,
 ) -> str:
     dashboard_tracks = {track: list(rows) for track, rows in track_rows.items()}
     for track_name, rows in (extra_track_rows or {}).items():
@@ -811,11 +824,16 @@ def render_html_dashboard(
     )
     sections.append(_render_recommendation_sections(dashboard_tracks))
 
+    _meta_refresh = (
+        f'<meta http-equiv="refresh" content="{refresh_secs}">'
+        if refresh_secs > 0 else ""
+    )
     return f"""<!doctype html>
 <html lang=\"en\">
 <head>
   <meta charset=\"utf-8\">
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  {_meta_refresh}
   <title>Revolut Scanner — {_run_id}</title>
   <style>
     :root {{
