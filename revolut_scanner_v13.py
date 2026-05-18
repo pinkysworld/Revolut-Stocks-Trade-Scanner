@@ -168,6 +168,11 @@ try:
 except Exception:
     ZoneInfo = None
 
+from scanner.model import (
+    build_features as ml_build_features,
+    load_model as ml_load_model,
+    win_probability as ml_win_probability,
+)
 from scanner.indicators import (
     adx,
     atr,
@@ -580,6 +585,13 @@ def oos_asset_class_for_row(row):
 def format_oos_asset_class(asset_class):
     return asset_class.replace("_", " ")
 
+# ticker -> {"isin": str, "wkn": str}; populated from the instruments CSV
+# (optional columns) and best-effort yfinance lookups. Used to print the
+# WKN/ISIN on recommendations so they are easy to locate inside Revolut.
+SECURITY_IDS = {}
+SECURITY_ID_CACHE = os.path.join(YF_CACHE_DIR, "security_ids.json")
+
+
 def load_assets():
     if not os.path.exists(INSTRUMENTS_CSV):
         return ASSETS
@@ -594,6 +606,8 @@ def load_assets():
         enabled = df["enabled"].fillna(True).astype(str).str.lower()
         df = df[enabled.isin(["true", "1", "yes", "y"])]
 
+    has_isin = "isin" in df.columns
+    has_wkn = "wkn" in df.columns
     assets = []
     seen = set()
     for row in df.itertuples(index=False):
@@ -606,6 +620,14 @@ def load_assets():
             continue
         seen.add(key)
         assets.append((ticker, name, asset_class, currency))
+        if has_isin or has_wkn:
+            def _clean(v):
+                s = str(v).strip()
+                return "" if s.lower() in ("", "nan", "none") else s
+            isin = _clean(getattr(row, "isin", "")) if has_isin else ""
+            wkn = _clean(getattr(row, "wkn", "")) if has_wkn else ""
+            if (isin or wkn) and ticker not in SECURITY_IDS:
+                SECURITY_IDS[ticker] = {"isin": isin, "wkn": wkn}
 
     stock_tickers = {ticker for ticker, _, asset_class, _ in assets
                      if asset_class == "stock"}
@@ -680,9 +702,19 @@ def _tz(name):
         return timezone.utc
 
 def _fmt_market_dt(value):
+    """Format a market datetime in the exchange timezone, and also in the
+    viewer's local timezone when that differs — so a user in, say, Germany
+    immediately sees when a US market opens in their own time."""
     if value is None:
         return ""
-    return value.strftime("%a %Y-%m-%d %H:%M %Z")
+    exchange = value.strftime("%a %Y-%m-%d %H:%M %Z")
+    try:
+        local = value.astimezone()  # convert to the system's local timezone
+        if local.utcoffset() != value.utcoffset():
+            return f"{exchange} ({local:%H:%M %Z} your time)"
+    except Exception:
+        pass
+    return exchange
 
 def _next_weekday_at(local, target_time, start_days=0):
     candidate = (local + timedelta(days=start_days)).replace(
@@ -817,6 +849,63 @@ def market_info_for_row(row):
 def attach_market_fields(rows):
     for row in rows:
         row.update(market_info_for_row(row))
+    return rows
+
+# =================== SECURITY IDENTIFIERS (WKN / ISIN) ===================
+def _load_security_id_cache():
+    try:
+        with open(SECURITY_ID_CACHE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+def _save_security_id_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(SECURITY_ID_CACHE), exist_ok=True)
+        with open(SECURITY_ID_CACHE, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, indent=0, sort_keys=True)
+    except Exception:
+        pass
+
+def _fetch_isin(ticker):
+    """Best-effort ISIN lookup via yfinance. Returns '' on any failure."""
+    try:
+        val = yf.Ticker(ticker).isin
+        if isinstance(val, str) and len(val.strip()) >= 9 and val.strip() != "-":
+            return val.strip()
+    except Exception:
+        pass
+    return ""
+
+def resolve_security_identifiers(assets):
+    """Populate SECURITY_IDS with ISINs (best-effort, permanently cached).
+
+    Crypto, CFDs and indices have no ISIN, so only equities and ETFs are
+    looked up. WKN is German-specific and has no free programmatic source —
+    it is read from the optional `wkn` column of the instruments CSV only.
+    """
+    cache = _load_security_id_cache()
+    equity_tickers = sorted({t for t, _, ac, _ in assets if ac in ("stock", "etf")})
+    todo = [t for t in equity_tickers
+            if t not in cache and not SECURITY_IDS.get(t, {}).get("isin")]
+    if todo:
+        print(f"Resolving ISINs for {len(todo)} instrument(s) (one-time, cached)...")
+        workers = max(1, min(YF_DOWNLOAD_MAX_WORKERS, len(todo)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for tk, isin in zip(todo, pool.map(_fetch_isin, todo)):
+                cache[tk] = isin
+        _save_security_id_cache(cache)
+    for t in equity_tickers:
+        entry = SECURITY_IDS.setdefault(t, {"isin": "", "wkn": ""})
+        if not entry.get("isin") and cache.get(t):
+            entry["isin"] = cache[t]
+
+def attach_security_identifiers(rows):
+    """Tag each row with isin/wkn so recommendations are easy to find on Revolut."""
+    for row in rows:
+        ids = SECURITY_IDS.get(row["ticker"], {})
+        row["isin"] = ids.get("isin", "")
+        row["wkn"] = ids.get("wkn", "")
     return rows
 
 # =================== EARNINGS ===================
@@ -1443,6 +1532,33 @@ def current_crypto_mean_reversion_signal(last):
             and last["Close"] > last["Open"]
             and last["Close"] > last["SMA50"])
 
+# Optional ML win-probability model (model_weights.json). It is only used when
+# its held-out test AUC clears ML_MIN_TEST_AUC — a model that does not beat
+# chance is worse than useless (it would show a falsely precise number), so it
+# is disabled rather than displayed.
+ML_MIN_TEST_AUC = 0.53
+_ML_MODEL = ml_load_model()
+_ML_DISABLED_NOTE = ""
+if _ML_MODEL is not None:
+    _auc = float(_ML_MODEL.get("test_auc", 0.0))
+    if _auc < ML_MIN_TEST_AUC:
+        _ML_DISABLED_NOTE = (f"ML model disabled: held-out test AUC {_auc:.3f} "
+                             f"< {ML_MIN_TEST_AUC} (no validated edge). "
+                             f"Retrain with better features to enable it.")
+        _ML_MODEL = None
+
+
+def ml_win_prob_for(df, asset_class):
+    """P(positive forward return) from the ML model for the latest bar, or NaN."""
+    if _ML_MODEL is None:
+        return float("nan")
+    try:
+        feats = ml_build_features(df, asset_class).iloc[-1]
+        return ml_win_probability(_ML_MODEL, feats.values)
+    except Exception:
+        return float("nan")
+
+
 def current_analysis(df, ticker, name, asset_class, currency):
     last, prev = df.iloc[-1], df.iloc[-2]
     if last[CRIT_COLS].isna().any() or prev[CRIT_COLS].isna().any():
@@ -1472,7 +1588,8 @@ def current_analysis(df, ticker, name, asset_class, currency):
             "predicted_move_pct": pred_move,
             "confidence": confidence,
             "signals": ", ".join(sig),
-            "daytrade_signals": ", ".join(day_sig)}
+            "daytrade_signals": ", ".join(day_sig),
+            "ml_win_prob": ml_win_prob_for(df, asset_class)}
 
 def current_intraday_analysis(df, ticker, name, asset_class, currency):
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -3008,6 +3125,19 @@ def _card_header(i, r, *, extra: str = "", stars: bool = False) -> None:
         print(_kv("Margin posted", f"{C.BOLD}{margin:.0f}{C.RESET} {C.GREY}{r.get('currency','')}{C.RESET}"
                   f"   {C.DIM}controls {margin*lev:.0f} notional at {lev:.0f}:1 leverage "
                   f"(overnight financing charged on notional){C.RESET}"))
+    isin, wkn = r.get("isin", ""), r.get("wkn", "")
+    if isin or wkn:
+        parts = []
+        if wkn:
+            parts.append(f"{C.GREY}WKN{C.RESET} {C.BOLD}{wkn}{C.RESET}")
+        if isin:
+            parts.append(f"{C.GREY}ISIN{C.RESET} {C.BOLD}{isin}{C.RESET}")
+        print(_kv("Revolut search", "   ".join(parts)))
+    mlp = r.get("ml_win_prob")
+    if mlp is not None and not (isinstance(mlp, float) and np.isnan(mlp)):
+        col = C.GREEN if mlp >= 0.55 else (C.YELLOW if mlp >= 0.50 else C.RED)
+        print(_kv("ML win probability", f"{col}{C.BOLD}{mlp*100:.1f}%{C.RESET}"
+                  f"   {C.DIM}(model P of positive 10-day return){C.RESET}"))
 
 
 def _signal_value(signals: str) -> str:
@@ -3499,7 +3629,12 @@ def run_scan(iteration=0):
     )
     asset_count = len(assets)
     crypto_count = sum(1 for a in assets if a[2] == "crypto")
+    resolve_security_identifiers(assets)
     print(f"Loading {len(assets)} instruments ({crypto_count} crypto, {LOOKBACK} of daily history)...")
+    if _ML_MODEL is not None:
+        print(f"ML win-probability model active (test AUC {_ML_MODEL.get('test_auc')}).")
+    elif _ML_DISABLED_NOTE:
+        print(f"{C.YELLOW}{_ML_DISABLED_NOTE}{C.RESET}")
     if os.path.exists(INSTRUMENTS_CSV):
         print(f"Instrument universe loaded from {INSTRUMENTS_CSV}")
     if symbol_overrides:
@@ -3571,6 +3706,7 @@ def run_scan(iteration=0):
               f"{', '.join(failed[:8])}{'...' if len(failed) > 8 else ''})")
 
     scan_rows.sort(key=lambda x: x["predicted_net_eur"], reverse=True)
+    attach_security_identifiers(scan_rows)
     BAR = "─" * 135
 
     # ============== PARAMETER SWEEP CACHE HELPERS ==============

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-05-18
+
+- Added `analyze_signals.py` — per-signal attribution showing each scoring
+  signal's realized forward-return lift. Found several signals are noise or
+  negative-lift (`macd_bullish_cross`, `macro_bullish`, the BTC relative-
+  strength signals), and that `rsi_overbought` is wrongly penalised.
+- Added an optional ML win-probability model: `scanner/model.py` (numpy-only
+  inference), `train_model.py` (scikit-learn training). The model is gated on
+  held-out test AUC — the current model scored 0.49 (no edge), so the scanner
+  auto-disables it rather than display a misleading number.
+- Added optional `isin` / `wkn` columns to the instrument universe; recommendations
+  now show WKN/ISIN (best-effort ISIN auto-resolution via yfinance, cached) so
+  assets are easier to locate inside Revolut.
+
 ## 2026-05-17 (maintainability pass)
 
 - Fixed a regression in the daytrade path: `_score_adx` reads `ADXprev`, but `DAYTRADE_CRIT_COLS` did not list it, so `compute_daytrade_score` raised `KeyError: 'ADXprev'`.
