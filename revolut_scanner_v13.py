@@ -246,7 +246,7 @@ HOLD_CALENDAR_DAYS = 14
 LOOKBACK           = "3y"
 UNITS_PER_TRADE    = 1
 
-SCORE_THRESHOLD    = 3   # lowered after harmful signals were cut from compute_score
+SCORE_THRESHOLD    = 5   # calibrated to the cleaned compute_score range (≈ p50)
 CORR_MAX           = 0.75
 CORR_LOOKBACK_DAYS = 60
 OUTDIR             = "."
@@ -286,7 +286,9 @@ N_WORST_TRADES = 10
 
 # --- Recommendations (2-week swing, mixed asset classes) ---
 N_RECOMMENDATIONS  = 5
-MIN_SCORE_FOR_REC  = 2   # lowered after harmful signals were cut from compute_score
+MIN_SCORE_FOR_REC  = 4   # calibrated; the score barely discriminates for equities
+                         # (calibrate_thresholds.py) — the OOS gate and the
+                         # momentum tilt do the real filtering.
 ALLOW_WEAK_CLASSES = False
 STOP_LOSS_VOL_FRAC = 0.5
 MIN_RR_RATIO       = 1.2
@@ -349,7 +351,8 @@ CRYPTO_WEEKLY_HOLD_DAYS         = 5
 CRYPTO_WEEKLY_MIN_PREDICTED_PCT = round(CRYPTO_ROUND_TRIP_FEE_PCT + CRYPTO_WEEKLY_EDGE_BUFFER_PCT, 1)
 MIN_CRYPTO_WEEKLY_BT_TRADES     = 8     # was 12
 MIN_CRYPTO_WEEKLY_TEST_TRADES   = 4     # was 5
-CRYPTO_WEEKLY_MIN_SCORE         = 2     # lowered after compute_score signal cleanup
+CRYPTO_WEEKLY_MIN_SCORE         = 7     # calibrated: crypto forward-return lift
+                                        # turns positive at score ≥ 7
 CRYPTO_WEEKLY_TRADE_SUGGESTIONS_CSV = "crypto_weekly_trade_suggestions.csv"
 CRYPTO_WEEKLY_TRADE_SUGGESTION_COLUMNS = [
     "generated_at", "action", "ticker", "name", "asset_class", "setup", "horizon",
@@ -392,7 +395,7 @@ INTRADAY_STOP_LOSS_VOL_FRAC = 0.7
 # --- Mixed WEEK (5-day hold across all robust asset classes) ---
 N_WEEK_RECOMMENDATIONS = 5
 WEEK_HOLD_DAYS         = 5
-WEEK_MIN_SCORE         = 2   # lowered after compute_score signal cleanup
+WEEK_MIN_SCORE         = 4   # calibrated to the cleaned compute_score range
 
 # --- Stock WEEK (cash stocks, ~€1000 sizing, 5-day hold) ---
 N_STOCK_WEEK_RECOMMENDATIONS = 5

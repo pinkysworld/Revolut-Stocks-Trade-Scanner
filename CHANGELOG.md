@@ -14,6 +14,12 @@
   high — drawdowns and momentum reversals cluster in high-VIX windows.
 - Recommendations now show a "Win probability" — the empirical held-out OOS
   backtest win rate (a measured frequency, not a model output).
+- Re-fitted the score thresholds against data (`calibrate_thresholds.py`):
+  `SCORE_THRESHOLD` 5, `MIN_SCORE_FOR_REC`/`WEEK_MIN_SCORE` 4, and
+  `CRYPTO_WEEKLY_MIN_SCORE` 7 (crypto forward-return lift only turns positive
+  at score ≥ 7). The calibration also confirmed the score barely discriminates
+  for equities at any threshold — the OOS gate and momentum tilt are what
+  carry recommendation quality there.
 
 ## 2026-05-18 (later)
 
