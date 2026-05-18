@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-05-18 (scoring & regime)
+
+- Cleaned up `compute_score` using the per-signal attribution: removed the
+  signals with negative forward-return lift (`fresh_golden_cross`,
+  `rsi_oversold_reversal`, `rsi_healthy`, `macd_bullish_cross`,
+  `macd_hist_rising`), dropped the backwards `rsi_overbought` penalty, and
+  removed the BTC relative-strength block (it chased pumps; cross-sectional
+  strength is now handled by the regime-gated momentum factor). Score
+  thresholds lowered to match the smaller score range.
+- Added a VIX volatility-regime overlay: a bullish benchmark regime is
+  downgraded to neutral when the VIX is elevated and forced bearish when it is
+  high — drawdowns and momentum reversals cluster in high-VIX windows.
+- Recommendations now show a "Win probability" — the empirical held-out OOS
+  backtest win rate (a measured frequency, not a model output).
+
+## 2026-05-18 (later)
+
+- Added a regime-gated cross-sectional momentum tilt. `prototype_ranker.py`
+  forward-testing showed an ML ranker has no edge but naive cross-sectional
+  momentum does (top-5 momentum names beat the median by ~+2.4%/10 days).
+  Recommendations are now ranked by `rank_score` — a blend of the calibrated
+  ROI percentile and the asset's momentum rank within its peer class
+  (`MOMENTUM_TILT_WEIGHT`). The momentum component is neutralised when the
+  asset's macro regime is bearish, since momentum reverses in downtrends.
+- Cards show a "Momentum rank" line; the tilt is flagged as off in bearish regimes.
+
 ## 2026-05-18
 
 - Added `analyze_signals.py` — per-signal attribution showing each scoring

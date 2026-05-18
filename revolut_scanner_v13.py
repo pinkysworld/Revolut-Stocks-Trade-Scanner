@@ -246,7 +246,7 @@ HOLD_CALENDAR_DAYS = 14
 LOOKBACK           = "3y"
 UNITS_PER_TRADE    = 1
 
-SCORE_THRESHOLD    = 5
+SCORE_THRESHOLD    = 3   # lowered after harmful signals were cut from compute_score
 CORR_MAX           = 0.75
 CORR_LOOKBACK_DAYS = 60
 OUTDIR             = "."
@@ -286,10 +286,20 @@ N_WORST_TRADES = 10
 
 # --- Recommendations (2-week swing, mixed asset classes) ---
 N_RECOMMENDATIONS  = 5
-MIN_SCORE_FOR_REC  = 4
+MIN_SCORE_FOR_REC  = 2   # lowered after harmful signals were cut from compute_score
 ALLOW_WEAK_CLASSES = False
 STOP_LOSS_VOL_FRAC = 0.5
 MIN_RR_RATIO       = 1.2
+
+# --- Cross-sectional momentum tilt ---
+# Forward-test prototyping showed cross-sectional momentum (ranking assets by
+# recent return within their peer class) is the one robust edge in this
+# universe — top-5 momentum names beat the median by ~+2.4% per 10 days, while
+# an ML ranker on the same features had no edge. Recommendations are ranked by
+# a blend of the calibrated ROI percentile and this momentum rank. The tilt is
+# regime-gated: momentum is only trusted when the asset's macro regime is not
+# bearish (momentum crashes hard in sharp reversals).
+MOMENTUM_TILT_WEIGHT = 0.5    # 0 = pure ROI ranking, 1 = pure momentum ranking
 
 # --- Cash stock swing recommendations ---
 N_STOCK_RECOMMENDATIONS = 5
@@ -339,7 +349,7 @@ CRYPTO_WEEKLY_HOLD_DAYS         = 5
 CRYPTO_WEEKLY_MIN_PREDICTED_PCT = round(CRYPTO_ROUND_TRIP_FEE_PCT + CRYPTO_WEEKLY_EDGE_BUFFER_PCT, 1)
 MIN_CRYPTO_WEEKLY_BT_TRADES     = 8     # was 12
 MIN_CRYPTO_WEEKLY_TEST_TRADES   = 4     # was 5
-CRYPTO_WEEKLY_MIN_SCORE         = 3     # was 4
+CRYPTO_WEEKLY_MIN_SCORE         = 2     # lowered after compute_score signal cleanup
 CRYPTO_WEEKLY_TRADE_SUGGESTIONS_CSV = "crypto_weekly_trade_suggestions.csv"
 CRYPTO_WEEKLY_TRADE_SUGGESTION_COLUMNS = [
     "generated_at", "action", "ticker", "name", "asset_class", "setup", "horizon",
@@ -382,7 +392,7 @@ INTRADAY_STOP_LOSS_VOL_FRAC = 0.7
 # --- Mixed WEEK (5-day hold across all robust asset classes) ---
 N_WEEK_RECOMMENDATIONS = 5
 WEEK_HOLD_DAYS         = 5
-WEEK_MIN_SCORE         = 4
+WEEK_MIN_SCORE         = 2   # lowered after compute_score signal cleanup
 
 # --- Stock WEEK (cash stocks, ~€1000 sizing, 5-day hold) ---
 N_STOCK_WEEK_RECOMMENDATIONS = 5
@@ -404,6 +414,16 @@ MAX_STOCK_INTRADAY_CANDIDATES    = 20
 TAKE_PROFIT_AT_PRED = True
 USE_REGIME_FILTER   = True
 REGIME_BENCHMARK    = "^GSPC"
+
+# --- Volatility-regime overlay (VIX) ---
+# A rising-trend benchmark only counts as "bullish" while volatility is
+# contained. When the VIX is elevated a bullish regime is downgraded to
+# neutral; when it is high the regime is forced bearish — equity drawdowns
+# cluster in high-VIX windows, and momentum reverses there.
+USE_VIX_REGIME_OVERLAY = True
+VIX_TICKER             = "^VIX"
+VIX_ELEVATED           = 25.0   # bullish regime → neutral above this
+VIX_HIGH               = 32.0   # regime → bearish above this
 
 # --- BTC-based regime overlay for crypto ---
 USE_BTC_REGIME_FOR_CRYPTO = True
@@ -908,6 +928,31 @@ def attach_security_identifiers(rows):
         row["wkn"] = ids.get("wkn", "")
     return rows
 
+# =================== CROSS-SECTIONAL MOMENTUM ===================
+def attach_momentum_factor(rows):
+    """Tag each row with its cross-sectional momentum rank within its asset class.
+
+    momentum_rank  — percentile (0..1) of the 20-day return vs peers that day.
+    momentum_gated — the same, but neutralised to 0.5 when the asset's macro
+                     regime is bearish, since momentum reverses in downtrends.
+    """
+    by_class = {}
+    for row in rows:
+        by_class.setdefault(row["asset_class"], []).append(row)
+    for group in by_class.values():
+        valid = [r for r in group
+                 if r.get("mom_raw") is not None and not pd.isna(r.get("mom_raw"))]
+        n = len(valid)
+        for r in group:
+            r["momentum_rank"] = 0.5
+        if n >= 5:
+            for i, r in enumerate(sorted(valid, key=lambda x: x["mom_raw"])):
+                r["momentum_rank"] = i / (n - 1)
+    for row in rows:
+        mom = row.get("momentum_rank", 0.5)
+        row["momentum_gated"] = mom if row.get("regime", 0) >= 0 else 0.5
+    return rows
+
 # =================== EARNINGS ===================
 def upcoming_earnings_date(ticker, within_days=14):
     """Return next earnings date within `within_days`, or None.  Best-effort —
@@ -1072,6 +1117,16 @@ def prefetch_histories(tickers, period=LOOKBACK, interval="1d", label="daily"):
     return histories
 
 # =================== REGIME ===================
+def _load_vix_series(index):
+    """Daily VIX close reindexed onto `index`, or None on any failure."""
+    df = download_history(VIX_TICKER, LOOKBACK, "1d")
+    if df is None or df.empty:
+        return None
+    try:
+        return df["Close"].reindex(index, method="ffill")
+    except Exception:
+        return None
+
 def load_regime():
     if not USE_REGIME_FILTER:
         return None
@@ -1084,6 +1139,12 @@ def load_regime():
     regime = pd.Series(0, index=c.index, dtype=int)
     regime[(c > s50) & (s50 > s200)] =  1
     regime[(c < s50) & (s50 < s200)] = -1
+    # VIX overlay: a trend is only "bullish" while volatility is contained.
+    if USE_VIX_REGIME_OVERLAY:
+        vix = _load_vix_series(c.index)
+        if vix is not None:
+            regime[(regime == 1) & (vix > VIX_ELEVATED)] = 0
+            regime[vix > VIX_HIGH] = -1
     return regime
 
 def load_btc_regime():
@@ -1236,15 +1297,12 @@ def compute_score(last, prev, asset_class=None):
         score += 1; sig.append("20d_breakout_no_vol")
     if last["Close"] > last["DonchH"]:
         score += 1; sig.append("donchian_breakout")
-    if prev["SMA50"] <= prev["SMA200"] and last["SMA50"] > last["SMA200"]:
-        score += 2; sig.append("fresh_golden_cross")
-    if 45 <= last["RSI"] <= 65:                          score += 1; sig.append("rsi_healthy")
-    if prev["RSI"] < 30 <= last["RSI"]:                  score += 2; sig.append("rsi_oversold_reversal")
-    if last["RSI"] > 75:                                 score -= 1; sig.append("rsi_overbought")
-    if prev["MACD"] < prev["MACDsig"] and last["MACD"] > last["MACDsig"]:
-        score += 2; sig.append("macd_bullish_cross")
-    if last["MACDhist"] > 0 and last["MACDhist"] > prev["MACDhist"]:
-        score += 1; sig.append("macd_hist_rising")
+    # Removed after per-signal attribution (analyze_signals.py) found negative
+    # forward-return lift: fresh_golden_cross (-0.01% for +2 pts),
+    # rsi_oversold_reversal (-0.13%), rsi_healthy (-0.24%), macd_bullish_cross
+    # (-0.43%), macd_hist_rising (-0.24%). The rsi_overbought penalty was also
+    # dropped — overbought RSI preceded *positive* returns (momentum
+    # continuation, +0.21% lift), so docking points was backwards.
     if prev["Close"] < prev["BBL"] and last["Close"] > last["BBL"]:
         score += 1; sig.append("bb_lower_bounce")
     if prev["Close"] <= prev["BBH"] and last["Close"] > last["BBH"]:
@@ -1268,18 +1326,10 @@ def compute_score(last, prev, asset_class=None):
     score += adx_s; sig.extend(adx_sig)
     reg_s, reg_sig = _score_regime(last)
     score += reg_s; sig.extend(reg_sig)
-    # Crypto-specific: relative strength vs BTC (signals named differently
-    # so users can see the difference in the output's "Active signals" line)
-    if asset_class == "crypto" and USE_BTC_RELATIVE_STRENGTH:
-        rs7  = last.get("vs_btc_7d", 0.0)
-        rs30 = last.get("vs_btc_30d", 0.0)
-        if pd.notna(rs7):
-            if rs7 > BTC_RS_7D_BULL_THRESHOLD_PCT:
-                score += 1; sig.append(f"outperforming_btc_7d(+{rs7:.1f}%)")
-            elif rs7 < BTC_RS_7D_BEAR_THRESHOLD_PCT:
-                score -= 1; sig.append(f"underperforming_btc_7d({rs7:.1f}%)")
-        if pd.notna(rs30) and rs30 > BTC_RS_30D_BULL_THRESHOLD_PCT:
-            score += 1; sig.append(f"outperforming_btc_30d(+{rs30:.1f}%)")
+    # The BTC relative-strength block was removed: attribution showed
+    # "outperforming BTC" preceded ~-3% returns (it was chasing pumps).
+    # Cross-sectional relative strength is now handled correctly, and
+    # regime-gated, by attach_momentum_factor instead.
     return score, sig
 
 def precompute_scores(df, asset_class=None):
@@ -1589,7 +1639,8 @@ def current_analysis(df, ticker, name, asset_class, currency):
             "confidence": confidence,
             "signals": ", ".join(sig),
             "daytrade_signals": ", ".join(day_sig),
-            "ml_win_prob": ml_win_prob_for(df, asset_class)}
+            "ml_win_prob": ml_win_prob_for(df, asset_class),
+            "mom_raw": float(last["ret20"]) if pd.notna(last.get("ret20")) else np.nan}
 
 def current_intraday_analysis(df, ticker, name, asset_class, currency):
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -1955,8 +2006,9 @@ def build_recommendations(scan_rows, oos_results, oos_lookup):
         })
     recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
                      roi_key="expected_roi_pct", notional_key="notional",
-                     full_avg_key="oos_test_avg", test_avg_key="oos_test_avg")
-    recs.sort(key=lambda x: x["expected_roi_pct"], reverse=True)
+                     full_avg_key="oos_test_avg", test_avg_key="oos_test_avg",
+                     test_winrate_key="oos_test_winrate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     return recs[:N_RECOMMENDATIONS], robust, weak
 
 # =================== STOCK SWING ===================
@@ -2017,7 +2069,8 @@ def calibrated_expected_move(full_avg, test_avg):
     return 0.0
 
 def recalibrate_recs(recs, *, move_key, net_key, roi_key,
-                     notional_key, full_avg_key, test_avg_key):
+                     notional_key, full_avg_key, test_avg_key,
+                     test_winrate_key=None):
     """Re-anchor a track's headline forecast to realized backtest performance
     and express ROI on posted margin (so leveraged CFDs read correctly).
 
@@ -2035,6 +2088,25 @@ def recalibrate_recs(recs, *, move_key, net_key, roi_key,
         r["margin_eur"] = margin
         r["leverage"] = cfd_leverage(r["asset_class"])
         r["expected_move_calibrated"] = True
+        # Win probability — the empirical held-out OOS test-window win rate.
+        # This is a measured frequency, not a model output: of the backtested
+        # trades in the lookahead-free test window, the fraction that profited.
+        if test_winrate_key is not None:
+            wr = r.get(test_winrate_key)
+            r["win_probability"] = (wr / 100.0
+                                    if wr is not None and np.isfinite(wr) else float("nan"))
+    # Blend the calibrated-ROI ranking with the regime-gated momentum tilt.
+    rois = sorted(r[roi_key] for r in recs
+                  if r.get(roi_key) is not None and np.isfinite(r[roi_key]))
+    for r in recs:
+        roi = r.get(roi_key)
+        if rois and roi is not None and np.isfinite(roi):
+            roi_pctile = sum(1 for x in rois if x <= roi) / len(rois)
+        else:
+            roi_pctile = 0.5
+        mom = r.get("momentum_gated", 0.5)
+        r["rank_score"] = ((1.0 - MOMENTUM_TILT_WEIGHT) * roi_pctile
+                           + MOMENTUM_TILT_WEIGHT * mom)
     return recs
 
 def build_stock_recommendations(scan_rows, enriched, scores_map, robust_classes, weak_classes):
@@ -2085,8 +2157,9 @@ def build_stock_recommendations(scan_rows, enriched, scores_map, robust_classes,
         })
     recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
                      roi_key="expected_roi_pct", notional_key="notional",
-                     full_avg_key="bt_avg", test_avg_key="test_avg")
-    recs.sort(key=lambda x: (x["expected_roi_pct"], x["bt_avg"]), reverse=True)
+                     full_avg_key="bt_avg", test_avg_key="test_avg",
+                     test_winrate_key="test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     return recs[:N_STOCK_RECOMMENDATIONS]
 
 # =================== CRYPTO — WEEKLY (5-day hold, daily bars) ===================
@@ -2185,8 +2258,9 @@ def build_crypto_weekly_recommendations(scan_rows, enriched, scores_map,
         })
     recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
                      roi_key="expected_roi_pct", notional_key="notional",
-                     full_avg_key="bt_avg", test_avg_key="test_avg")
-    recs.sort(key=lambda x: (x["expected_roi_pct"], x["bt_avg"]), reverse=True)
+                     full_avg_key="bt_avg", test_avg_key="test_avg",
+                     test_winrate_key="test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     if CRYPTO_FILTER_DIAGNOSTIC:
         print(f"{C.CYAN}[CRYPTO WEEKLY FUNNEL]{C.RESET} "
               f"{diag['start']} candidates → {diag['score']} passed score≥{CRYPTO_WEEKLY_MIN_SCORE}"
@@ -2334,9 +2408,9 @@ def build_daytrade_recommendations(scan_rows, enriched, day_scores_map):
     recalibrate_recs(recs, move_key="daytrade_predicted_move_pct",
                      net_key="daytrade_predicted_net_eur", roi_key="daytrade_expected_roi_pct",
                      notional_key="daytrade_notional",
-                     full_avg_key="daytrade_bt_avg", test_avg_key="daytrade_test_avg")
-    recs.sort(key=lambda x: (x["daytrade_expected_roi_pct"], x["daytrade_test_avg"]),
-              reverse=True)
+                     full_avg_key="daytrade_bt_avg", test_avg_key="daytrade_test_avg",
+                     test_winrate_key="daytrade_test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     return recs[:N_DAYTRADE_RECOMMENDATIONS]
 
 # =================== STOCK DAYTRADE ===================
@@ -2395,9 +2469,9 @@ def build_stock_daytrade_recommendations(scan_rows, enriched, day_scores_map):
     recalibrate_recs(recs, move_key="daytrade_predicted_move_pct",
                      net_key="daytrade_predicted_net_eur", roi_key="daytrade_expected_roi_pct",
                      notional_key="daytrade_notional",
-                     full_avg_key="stock_dt_full_avg", test_avg_key="stock_dt_test_avg")
-    recs.sort(key=lambda x: (x["daytrade_expected_roi_pct"], x.get("stock_dt_test_avg", 0)),
-              reverse=True)
+                     full_avg_key="stock_dt_full_avg", test_avg_key="stock_dt_test_avg",
+                     test_winrate_key="stock_dt_test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     return recs[:N_STOCK_DAYTRADE_RECOMMENDATIONS]
 
 # =================== CRYPTO DAYTRADE (1-3 day, daily bars) ===================
@@ -2467,9 +2541,9 @@ def build_crypto_daytrade_recommendations(scan_rows, enriched, day_scores_map):
     recalibrate_recs(recs, move_key="daytrade_predicted_move_pct",
                      net_key="daytrade_predicted_net_eur", roi_key="daytrade_expected_roi_pct",
                      notional_key="daytrade_notional",
-                     full_avg_key="crypto_dt_full_avg", test_avg_key="crypto_dt_test_avg")
-    recs.sort(key=lambda x: (x["daytrade_expected_roi_pct"], x.get("crypto_dt_test_avg", 0)),
-              reverse=True)
+                     full_avg_key="crypto_dt_full_avg", test_avg_key="crypto_dt_test_avg",
+                     test_winrate_key="crypto_dt_test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     if CRYPTO_FILTER_DIAGNOSTIC:
         print(f"{C.CYAN}[CRYPTO DAYTRADE FUNNEL]{C.RESET} "
               f"{diag['start']} candidates → {diag['score']} passed dt-score≥{CRYPTO_DAYTRADE_SCORE_THRESHOLD}"
@@ -2569,8 +2643,9 @@ def build_crypto_mean_reversion_recommendations(scan_rows, enriched):
 
     recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
                      roi_key="expected_roi_pct", notional_key="notional",
-                     full_avg_key="mr_full_avg", test_avg_key="mr_test_avg")
-    recs.sort(key=lambda x: (x["expected_roi_pct"], x.get("mr_test_avg", 0)), reverse=True)
+                     full_avg_key="mr_full_avg", test_avg_key="mr_test_avg",
+                     test_winrate_key="mr_test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     if CRYPTO_FILTER_DIAGNOSTIC:
         print(f"{C.CYAN}[CRYPTO MEAN-REVERSION FUNNEL]{C.RESET} "
               f"{diag['start']} candidates → {diag['signal']} live RSI2<{CRYPTO_MR_RSI2_MAX:g} bounce signals"
@@ -2698,9 +2773,9 @@ def build_crypto_intraday_recommendations(crypto_candidates, regime_series, hour
     recalibrate_recs(recs, move_key="intraday_predicted_move_pct",
                      net_key="intraday_predicted_net_eur", roi_key="intraday_expected_roi_pct",
                      notional_key="intraday_notional",
-                     full_avg_key="intraday_bt_avg", test_avg_key="intraday_test_avg")
-    recs.sort(key=lambda x: (x["intraday_expected_roi_pct"], x.get("intraday_test_avg", 0)),
-              reverse=True)
+                     full_avg_key="intraday_bt_avg", test_avg_key="intraday_test_avg",
+                     test_winrate_key="intraday_test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     if CRYPTO_FILTER_DIAGNOSTIC:
         print(f"{C.CYAN}[CRYPTO INTRADAY FUNNEL]{C.RESET} "
               f"{diag['start']} candidates → {diag['hourly_data']} had hourly data"
@@ -2779,8 +2854,9 @@ def build_week_recommendations(scan_rows, enriched, scores_map, oos_results, oos
         })
     recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
                      roi_key="expected_roi_pct", notional_key="notional",
-                     full_avg_key="week_bt_avg", test_avg_key="week_test_avg")
-    recs.sort(key=lambda x: x["expected_roi_pct"], reverse=True)
+                     full_avg_key="week_bt_avg", test_avg_key="week_test_avg",
+                     test_winrate_key="week_test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     return recs[:N_WEEK_RECOMMENDATIONS]
 
 # =================== STOCK WEEK (cash stocks, 5-day hold, sized) ===================
@@ -2846,8 +2922,9 @@ def build_stock_week_recommendations(scan_rows, enriched, scores_map, robust_cla
         })
     recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
                      roi_key="expected_roi_pct", notional_key="notional",
-                     full_avg_key="sw_full_avg", test_avg_key="sw_test_avg")
-    recs.sort(key=lambda x: (x["expected_roi_pct"], x["sw_test_avg"]), reverse=True)
+                     full_avg_key="sw_full_avg", test_avg_key="sw_test_avg",
+                     test_winrate_key="sw_test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     return recs[:N_STOCK_WEEK_RECOMMENDATIONS]
 
 # =================== STOCK INTRADAY (4-24 hour hold on HOURLY bars) ===================
@@ -2985,9 +3062,9 @@ def build_stock_intraday_recommendations(stock_candidates, regime_series, hourly
     recalibrate_recs(recs, move_key="intraday_predicted_move_pct",
                      net_key="intraday_predicted_net_eur", roi_key="intraday_expected_roi_pct",
                      notional_key="intraday_notional",
-                     full_avg_key="intraday_bt_avg", test_avg_key="intraday_test_avg")
-    recs.sort(key=lambda x: (x["intraday_expected_roi_pct"], x.get("intraday_test_avg", 0)),
-              reverse=True)
+                     full_avg_key="intraday_bt_avg", test_avg_key="intraday_test_avg",
+                     test_winrate_key="intraday_test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
     return recs[:N_STOCK_INTRADAY_RECOMMENDATIONS]
 
 # =================== PRINTERS ===================
@@ -3138,6 +3215,18 @@ def _card_header(i, r, *, extra: str = "", stars: bool = False) -> None:
         col = C.GREEN if mlp >= 0.55 else (C.YELLOW if mlp >= 0.50 else C.RED)
         print(_kv("ML win probability", f"{col}{C.BOLD}{mlp*100:.1f}%{C.RESET}"
                   f"   {C.DIM}(model P of positive 10-day return){C.RESET}"))
+    mom = r.get("momentum_rank")
+    if mom is not None:
+        col = C.GREEN if mom >= 0.66 else (C.YELLOW if mom >= 0.33 else C.RED)
+        gated_off = r.get("regime", 0) < 0
+        note = (f"   {C.YELLOW}momentum tilt off — bearish regime{C.RESET}"
+                if gated_off else f"   {C.DIM}cross-sectional 20-day vs peers{C.RESET}")
+        print(_kv("Momentum rank", f"{col}{C.BOLD}{mom*100:.0f}th pct{C.RESET}{note}"))
+    wp = r.get("win_probability")
+    if wp is not None and not (isinstance(wp, float) and np.isnan(wp)):
+        col = C.GREEN if wp >= 0.55 else (C.YELLOW if wp >= 0.45 else C.RED)
+        print(_kv("Win probability", f"{col}{C.BOLD}{wp*100:.0f}%{C.RESET}"
+                  f"   {C.DIM}held-out OOS backtest win rate{C.RESET}"))
 
 
 def _signal_value(signals: str) -> str:
@@ -3707,6 +3796,7 @@ def run_scan(iteration=0):
 
     scan_rows.sort(key=lambda x: x["predicted_net_eur"], reverse=True)
     attach_security_identifiers(scan_rows)
+    attach_momentum_factor(scan_rows)
     BAR = "─" * 135
 
     # ============== PARAMETER SWEEP CACHE HELPERS ==============

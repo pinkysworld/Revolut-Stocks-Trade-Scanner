@@ -135,6 +135,35 @@ def test_recalibrate_recs_anchors_roi_to_backtest_and_margin():
     assert cfd["margin_eur"] == pytest.approx(1000.0)
 
 
+# ------------------------ momentum factor ------------------------------
+
+def test_momentum_rank_is_cross_sectional_percentile():
+    rows = [{"asset_class": "stock", "regime": 1, "mom_raw": m}
+            for m in (0.01, 0.05, 0.02, 0.09, 0.04, 0.07)]
+    scanner.attach_momentum_factor(rows)
+    ranks = sorted(r["momentum_rank"] for r in rows)
+    assert ranks[0] == 0.0 and ranks[-1] == 1.0
+    # the highest 20-day return gets rank 1.0
+    top = max(rows, key=lambda r: r["mom_raw"])
+    assert top["momentum_rank"] == 1.0
+
+
+def test_momentum_gated_neutralised_in_bearish_regime():
+    rows = [{"asset_class": "stock", "regime": 1, "mom_raw": m}
+            for m in (0.01, 0.05, 0.02, 0.09, 0.04, 0.07)]
+    rows[3]["regime"] = -1  # the top-momentum name, but bearish regime
+    scanner.attach_momentum_factor(rows)
+    assert rows[3]["momentum_rank"] == 1.0      # raw rank still computed
+    assert rows[3]["momentum_gated"] == 0.5     # but neutralised for ranking
+
+
+def test_momentum_small_group_defaults_to_neutral():
+    rows = [{"asset_class": "etf", "regime": 1, "mom_raw": 0.03},
+            {"asset_class": "etf", "regime": 1, "mom_raw": 0.05}]
+    scanner.attach_momentum_factor(rows)  # <5 names -> no cross-section
+    assert all(r["momentum_rank"] == 0.5 for r in rows)
+
+
 # ------------------------------ simulate -------------------------------
 
 def _rising_frame(n=260, step=1.0):
@@ -235,12 +264,14 @@ def test_compute_score_rewards_price_above_moving_averages():
     assert {"above_SMA20", "above_SMA50", "above_SMA200"}.issubset(set(signals))
 
 
-def test_compute_score_penalizes_overbought_rsi():
+def test_compute_score_no_longer_penalizes_overbought_rsi():
+    # Attribution showed overbought RSI precedes positive returns (momentum
+    # continuation), so the old -1 penalty was removed.
     bar = _neutral_bar()
     bar["RSI"] = 80.0
     score, signals = scanner.compute_score(bar, _neutral_bar())
-    assert score == -1
-    assert "rsi_overbought" in signals
+    assert score == 0
+    assert "rsi_overbought" not in signals
 
 
 def test_compute_score_volume_breakout_bonus():
