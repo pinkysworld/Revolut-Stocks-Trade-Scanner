@@ -4,7 +4,9 @@
 
 The scanner entrypoint is [revolut_scanner_v13.py](../revolut_scanner_v13.py).
 
-The repo no longer keeps multiple tracked `revolut_scanner_v*.py` snapshots in the working tree. Historical versions should be inspected through git history; the live code path is the `v13` entrypoint plus extracted support modules in [scanner/runtime.py](../scanner/runtime.py), [scanner/reporting.py](../scanner/reporting.py), [scanner/quality.py](../scanner/quality.py), [scanner/risk.py](../scanner/risk.py), and [scanner/notifications.py](../scanner/notifications.py).
+The repo no longer keeps multiple tracked `revolut_scanner_v*.py` snapshots in the working tree. Historical versions should be inspected through git history; the live code path is the `v13` entrypoint plus extracted support modules in [scanner/runtime.py](../scanner/runtime.py), [scanner/reporting.py](../scanner/reporting.py), [scanner/quality.py](../scanner/quality.py), [scanner/risk.py](../scanner/risk.py), [scanner/indicators.py](../scanner/indicators.py), and [scanner/notifications.py](../scanner/notifications.py).
+
+[scanner/indicators.py](../scanner/indicators.py) holds the pure technical-indicator functions (moving averages, RSI, MACD, ATR, Bollinger bands, ADX, Donchian channels). They depend only on pandas/numpy and are unit-tested in [tests/test_indicators.py](../tests/test_indicators.py).
 
 A one-shot run follows this path:
 

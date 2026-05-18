@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-05-17 (maintainability pass)
+
+- Fixed a regression in the daytrade path: `_score_adx` reads `ADXprev`, but `DAYTRADE_CRIT_COLS` did not list it, so `compute_daytrade_score` raised `KeyError: 'ADXprev'`.
+- Extracted the pure technical indicators (`sma`, `ema`, `rsi`, `macd`, `atr`, `bollinger`, `rolling_position`, `adx`, `donchian`) into [scanner/indicators.py](scanner/indicators.py) so they can be unit-tested in isolation.
+- Added bounded retries with exponential backoff to yfinance downloads (`YF_DOWNLOAD_RETRIES`, `YF_DOWNLOAD_BACKOFF_SEC`) so transient network/rate-limit failures no longer make scans flaky.
+- Extracted shared track-builder helpers (`_enriched_df_and_scores`, `_oos_gate_ok`) to remove duplicated lookup and per-ticker OOS gating logic across the `build_*` recommendation tracks.
+- Pinned dependency version ranges in `requirements.txt` / `requirements-dev.txt` so an unattended yfinance/pandas upgrade cannot silently change data shape.
+- Added unit tests for indicators, scoring, backtest simulation, fee math, OOS verdict logic, and the new helpers.
+- Reworked the console output: boxed section headers, consistent recommendation "cards" with score stars and a market-status badge, aligned label/value rows, a standout EXPECTED NET ROI line, and color applied to ROI, predicted move, fees, win rates, backtest averages, and reward:risk across every recommendation track.
+- Recalibrated the predicted-move forecast: paper-trade forward tests showed the volatility-based projection overstated realized returns 2.5x-14x (ATR measures dispersion, not direction). The headline expected move/ROI is now anchored to realized backtest averages (`recalibrate_recs`); ATR volatility is retained only for TP/SL sizing.
+- Added a CFD leverage model (`CFD_LEVERAGE`, ESMA retail caps: equity 5:1, index 20:1, commodity 10:1). CFD recommendations now post margin = notional / leverage, express expected ROI on that margin, and show a leverage badge plus a margin line on the card. Overnight financing remains charged on full notional.
+- Added `paper_trade.py`, a forward-testing harness that replays each track's entry rule over held-out history to measure detection edge and predicted-move calibration.
+
 ## 2026-05-17
 
 - Added live-state persistence to `live_state.json`, parallel live price refreshes, TP/SL instant alerts, and live price timestamps in the dashboard.

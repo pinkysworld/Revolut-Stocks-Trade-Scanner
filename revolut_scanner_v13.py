@@ -168,6 +168,17 @@ try:
 except Exception:
     ZoneInfo = None
 
+from scanner.indicators import (
+    adx,
+    atr,
+    bollinger,
+    donchian,
+    ema,
+    macd,
+    rolling_position,
+    rsi,
+    sma,
+)
 from scanner.runtime import (
     apply_global_overrides,
     collect_cli_overrides,
@@ -204,6 +215,16 @@ CFD_BASE_RATE_USD      = 0.045
 CFD_BASE_RATE_EUR      = 0.025
 CFD_MARKUP             = 0.03
 CRYPTO_FEE_PCT         = 0.0199  # Revolut Standard / Free tier; Premium ≈ 0.0149
+
+# --- CFD leverage (ESMA retail caps) ---
+# CFDs are leveraged: you post only a fraction of the notional as margin, while
+# fees and overnight financing are charged on the FULL notional. Expected ROI
+# for CFD tracks is therefore expressed on posted margin, not on notional.
+CFD_LEVERAGE = {
+    "equity_cfd":    5.0,    # ESMA cap for single-stock CFDs
+    "index_cfd":     20.0,   # ESMA cap for major-index CFDs
+    "commodity_cfd": 10.0,   # ESMA cap for non-gold commodity CFDs (gold is 20:1)
+}
 
 # --- Slippage (applied in simulate() so backtest reflects real prices) ---
 SLIPPAGE_PCT = {
@@ -243,6 +264,8 @@ YF_INCREMENTAL_DAILY      = "10d"
 YF_INCREMENTAL_INTRADAY   = "10d"
 YF_DOWNLOAD_TIMEOUT_SEC   = 20
 YF_DOWNLOAD_MAX_WORKERS   = 8
+YF_DOWNLOAD_RETRIES       = 3       # attempts per ticker before giving up
+YF_DOWNLOAD_BACKOFF_SEC   = 1.5     # base delay; doubled after each failed attempt
 DISABLE_YF_CACHE          = bool(os.environ.get("DISABLE_YF_CACHE"))
 
 SWEEP_THRESHOLDS      = [3, 4, 5, 6, 7]
@@ -831,53 +854,6 @@ def upcoming_earnings_date(ticker, within_days=14):
         return None
 
 # =================== INDICATORS ===================
-def sma(s, n): return s.rolling(n).mean()
-def ema(s, n): return s.ewm(span=n, adjust=False).mean()
-
-def rsi(s, n=14):
-    d = s.diff()
-    g = d.clip(lower=0).rolling(n).mean()
-    l = (-d.clip(upper=0)).rolling(n).mean()
-    rs = g / l.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
-
-def macd(s, fast=12, slow=26, signal=9):
-    line = ema(s, fast) - ema(s, slow); sig = ema(line, signal)
-    return line, sig, line - sig
-
-def atr(df, n=14):
-    h, l, c = df["High"], df["Low"], df["Close"]
-    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-    return tr.rolling(n).mean()
-
-def bollinger(s, n=20, k=2):
-    mid = sma(s, n); sd = s.rolling(n).std()
-    return mid - k*sd, mid, mid + k*sd
-
-def rolling_position(close, high, low, n=20):
-    hh = high.rolling(n).max()
-    ll = low.rolling(n).min()
-    rng = (hh - ll).replace(0, np.nan)
-    return ((close - ll) / rng).clip(0, 1)
-
-def adx(df, n=14):
-    h, l, c = df["High"], df["Low"], df["Close"]
-    up_move   = h.diff()
-    down_move = -l.diff()
-    plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm  = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm   = pd.Series(plus_dm,  index=h.index)
-    minus_dm  = pd.Series(minus_dm, index=h.index)
-    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-    atr_n   = tr.rolling(n).mean().replace(0, np.nan)
-    plus_di  = 100 * (plus_dm.rolling(n).mean()  / atr_n)
-    minus_di = 100 * (minus_dm.rolling(n).mean() / atr_n)
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    return dx.rolling(n).mean()
-
-def donchian(high, low, n=20):
-    return high.shift(1).rolling(n).max(), low.shift(1).rolling(n).min()
-
 # =================== YFINANCE CACHE ===================
 _CACHE_WARNING_PRINTED = False
 
@@ -929,7 +905,7 @@ def _cache_is_fresh(path):
     age_sec = time.time() - os.path.getmtime(path)
     return age_sec <= YF_CACHE_MAX_AGE_MINUTES * 60
 
-def _raw_yf_download(ticker, period, interval="1d"):
+def _yf_download_once(ticker, period, interval):
     kwargs = {
         "tickers": ticker,
         "period": period,
@@ -942,13 +918,28 @@ def _raw_yf_download(ticker, period, interval="1d"):
     try:
         return _normalize_download(yf.download(**kwargs))
     except TypeError:
+        # Older yfinance builds reject the `timeout` kwarg.
         kwargs.pop("timeout", None)
+        return _normalize_download(yf.download(**kwargs))
+
+def _raw_yf_download(ticker, period, interval="1d"):
+    """Download history with bounded retries and exponential backoff.
+
+    yfinance fails intermittently (rate limits, transient network errors); a
+    single attempt makes the scan flaky. Retry a few times before giving up.
+    """
+    delay = YF_DOWNLOAD_BACKOFF_SEC
+    for attempt in range(1, YF_DOWNLOAD_RETRIES + 1):
         try:
-            return _normalize_download(yf.download(**kwargs))
+            df = _yf_download_once(ticker, period, interval)
+            if df is not None and not df.empty:
+                return df
         except Exception:
-            return None
-    except Exception:
-        return None
+            pass
+        if attempt < YF_DOWNLOAD_RETRIES:
+            time.sleep(delay)
+            delay *= 2
+    return None
 
 def download_history(ticker, period=LOOKBACK, interval="1d"):
     path = _safe_cache_name(ticker, period, interval)
@@ -1095,6 +1086,16 @@ def overnight_cost(asset_class, notional, currency, days):
     base = CFD_BASE_RATE_USD if currency == "USD" else CFD_BASE_RATE_EUR
     return notional * (base + CFD_MARKUP) * days / 360.0
 
+def cfd_leverage(asset_class):
+    """Leverage applied to a position. 1.0 for cash instruments."""
+    return CFD_LEVERAGE.get(asset_class, 1.0)
+
+def margin_required(asset_class, notional):
+    """Posted margin for a position. CFDs are leveraged, so only a fraction of
+    the notional is posted as margin; cash instruments post the full notional."""
+    lev = cfd_leverage(asset_class)
+    return notional / lev if lev > 0 else notional
+
 # =================== SCORING ===================
 # --- Shared signal helpers (used across swing / daytrade / intraday scorers) ---
 def _score_regime(last, label_bull="macro_bullish", label_bear="macro_bearish"):
@@ -1123,7 +1124,7 @@ CRIT_COLS = ["Close","Open","High","Low","SMA20","SMA50","SMA200",
 
 DAYTRADE_CRIT_COLS = ["Close","Open","High","Low","EMA8","EMA21","RSI",
                       "RSI2","MACDhist","ATR","ATRpct","ret1","ret2",
-                      "ret3","RangePos","VolRatio","ADX","Regime"]
+                      "ret3","RangePos","VolRatio","ADX","ADXprev","Regime"]
 
 INTRADAY_CRIT_COLS = ["Close","Open","High","Low","EMA8","EMA21","SMA20","SMA50",
                       "RSI","RSI2","MACD","MACDsig","MACDhist","ATR","ATRpct",
@@ -1700,8 +1701,11 @@ def refresh_swing_prices(recs, sl_vol_frac=STOP_LOSS_VOL_FRAC,
                          max(1, int(round(r.get("hold_days", HOLD_TRADING_DAYS) * 1.4))))
         ov = overnight_cost(cls, notional, r["currency"], cal_days)
         fees = of + cf + ov
-        gross = notional * r["predicted_move_pct"] / 100.0
+        # predicted_move_pct is the backtest-calibrated net return %; it is
+        # already net of fees, so net P/L = notional * move% (no fee subtraction).
+        net_eur = notional * r["predicted_move_pct"] / 100.0
         bull_g = notional * r["vol_2w_pct"] / 100.0
+        margin = margin_required(cls, notional)
         r["notional"] = notional
         if cls == "crypto":
             r["crypto_units"] = units
@@ -1711,11 +1715,12 @@ def refresh_swing_prices(recs, sl_vol_frac=STOP_LOSS_VOL_FRAC,
         r["open_fee"] = of; r["close_fee"] = cf; r["overnight"] = ov
         r["total_fees"] = fees
         r["breakeven_pct"] = fees / notional * 100 if notional > 0 else np.nan
-        r["predicted_net_eur"] = gross - fees
+        r["predicted_net_eur"] = net_eur
         r["bull_case_net_eur"] = bull_g - fees
         r["bear_case_net_eur"] = -bull_g - fees
-        r["expected_roi_pct"] = r["predicted_net_eur"] / notional * 100.0
-        sl, tp, rr = trade_levels(live, r["vol_2w_pct"], r["predicted_move_pct"], sl_vol_frac)
+        r["margin_eur"] = margin
+        r["expected_roi_pct"] = net_eur / margin * 100.0 if margin > 0 else np.nan
+        sl, tp, rr = trade_levels(live, r["vol_2w_pct"], r["vol_2w_pct"], sl_vol_frac)
         r["stop_loss_price"] = sl
         r["take_profit_price"] = tp
         r["risk_reward"] = rr
@@ -1746,15 +1751,17 @@ def refresh_daytrade_prices(recs, sl_vol_frac=DAYTRADE_STOP_LOSS_VOL_FRAC,
         cal_days = max(1, int(round(r["hold_days"] * 1.4)))
         ov = overnight_cost(cls, notional, r["currency"], cal_days)
         fees = of + cf + ov
-        gross = notional * r["daytrade_predicted_move_pct"] / 100.0
+        net_eur = notional * r["daytrade_predicted_move_pct"] / 100.0  # already net of fees
+        margin = margin_required(cls, notional)
         r["daytrade_units"] = units
         r["daytrade_notional"] = notional
         r["daytrade_fees_eur"] = fees
         r["daytrade_breakeven_pct"] = fees / notional * 100 if notional > 0 else np.nan
-        r["daytrade_predicted_net_eur"] = gross - fees
-        r["daytrade_expected_roi_pct"] = (gross - fees) / notional * 100 if notional > 0 else np.nan
+        r["daytrade_predicted_net_eur"] = net_eur
+        r["margin_eur"] = margin
+        r["daytrade_expected_roi_pct"] = net_eur / margin * 100 if margin > 0 else np.nan
         sl, tp, rr = trade_levels(live, r["daytrade_vol_pct"],
-                                  r["daytrade_predicted_move_pct"], sl_vol_frac)
+                                  r["daytrade_vol_pct"], sl_vol_frac)
         r["daytrade_stop_loss_price"] = sl
         r["daytrade_take_profit_price"] = tp
         r["daytrade_risk_reward"] = rr
@@ -1781,15 +1788,17 @@ def refresh_intraday_prices(recs, sl_vol_frac=INTRADAY_STOP_LOSS_VOL_FRAC,
             notional = live * units
         of, cf = fees_open_close(cls, notional)
         fees = of + cf  # no overnight for intraday
-        gross = notional * r["intraday_predicted_move_pct"] / 100.0
+        net_eur = notional * r["intraday_predicted_move_pct"] / 100.0  # already net of fees
+        margin = margin_required(cls, notional)
         r["intraday_units"] = units
         r["intraday_notional"] = notional
         r["intraday_fees_eur"] = fees
         r["intraday_breakeven_pct"] = fees / notional * 100 if notional > 0 else np.nan
-        r["intraday_predicted_net_eur"] = gross - fees
-        r["intraday_expected_roi_pct"] = (gross - fees) / notional * 100 if notional > 0 else np.nan
+        r["intraday_predicted_net_eur"] = net_eur
+        r["margin_eur"] = margin
+        r["intraday_expected_roi_pct"] = net_eur / margin * 100 if margin > 0 else np.nan
         sl, tp, rr = trade_levels(live, r["intraday_vol_pct"],
-                                  r["intraday_predicted_move_pct"], sl_vol_frac)
+                                  r["intraday_vol_pct"], sl_vol_frac)
         r["intraday_stop_loss_price"] = sl
         r["intraday_take_profit_price"] = tp
         r["intraday_risk_reward"] = rr
@@ -1827,6 +1836,9 @@ def build_recommendations(scan_rows, oos_results, oos_lookup):
             "oos_test_winrate": oos.get("vw"),
             "oos_test_avg": oos.get("va"),
         })
+    recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
+                     roi_key="expected_roi_pct", notional_key="notional",
+                     full_avg_key="oos_test_avg", test_avg_key="oos_test_avg")
     recs.sort(key=lambda x: x["expected_roi_pct"], reverse=True)
     return recs[:N_RECOMMENDATIONS], robust, weak
 
@@ -1841,6 +1853,73 @@ def run_per_ticker_oos(df, scores, asset_class, currency, threshold, hold, targe
     full  = simulate(df, scores, asset_class, currency, threshold, hold, warmup, n, target_notional)
     return summarize(full), summarize(train), summarize(test)
 
+# --- Shared track-builder helpers (used by the build_* recommendation tracks) ---
+def _enriched_df_and_scores(enriched, scores_map, r):
+    """Return (enriched_df, scores_series) for a scan row, or (None, None)."""
+    key = (r["ticker"], r["asset_class"])
+    return enriched.get(key, (None,))[0], scores_map.get(key)
+
+def _oos_gate_ok(full, train, test, *, min_full, min_test, require_train=True):
+    """Shared per-ticker OOS acceptance gate.
+
+    A track is accepted when the full sample has enough trades with a positive
+    average and the held-out test window also has enough trades and a positive
+    average. require_train additionally demands a positive train-window average.
+    """
+    if full["n"] < min_full:
+        return False
+    if full["avg"] is None or full["avg"] <= 0:
+        return False
+    if test["n"] < min_test:
+        return False
+    if test["avg"] is None or test["avg"] <= 0:
+        return False
+    if require_train and (train["avg"] is None or train["avg"] <= 0):
+        return False
+    return True
+
+def _is_num(v):
+    return v is not None and not (isinstance(v, float) and np.isnan(v))
+
+def calibrated_expected_move(full_avg, test_avg):
+    """Expected per-trade % return, anchored to realized backtest performance.
+
+    The scanner's volatility-based predicted move overstates the true edge:
+    paper-trade forward tests showed realized returns running 2.5x-14x below
+    the volatility forecast (ATR measures dispersion, not direction). This
+    blends the full-sample and held-out test backtest averages instead — both
+    are direction- and fee-aware. The test window is weighted higher because
+    it has no lookahead. Returns a net % of notional.
+    """
+    if _is_num(full_avg) and _is_num(test_avg):
+        return 0.4 * full_avg + 0.6 * test_avg
+    if _is_num(test_avg):
+        return test_avg
+    if _is_num(full_avg):
+        return full_avg
+    return 0.0
+
+def recalibrate_recs(recs, *, move_key, net_key, roi_key,
+                     notional_key, full_avg_key, test_avg_key):
+    """Re-anchor a track's headline forecast to realized backtest performance
+    and express ROI on posted margin (so leveraged CFDs read correctly).
+
+    TP/SL levels are deliberately left untouched — those are sized from ATR
+    volatility, which is the correct input for a price target/stop.
+    """
+    for r in recs:
+        exp_move = calibrated_expected_move(r.get(full_avg_key), r.get(test_avg_key))
+        notional = r.get(notional_key) or 0.0
+        net_eur = notional * exp_move / 100.0
+        margin = margin_required(r["asset_class"], notional)
+        r[move_key] = exp_move
+        r[net_key] = net_eur
+        r[roi_key] = (net_eur / margin * 100.0) if margin > 0 else float("nan")
+        r["margin_eur"] = margin
+        r["leverage"] = cfd_leverage(r["asset_class"])
+        r["expected_move_calibrated"] = True
+    return recs
+
 def build_stock_recommendations(scan_rows, enriched, scores_map, robust_classes, weak_classes):
     if "stock" not in (robust_classes | (weak_classes if ALLOW_WEAK_CLASSES else set())):
         return []
@@ -1852,21 +1931,20 @@ def build_stock_recommendations(scan_rows, enriched, scores_map, robust_classes,
         if r["predicted_net_eur"] <= 0:    continue
         if r["notional"] <= 0:             continue
 
-        key = (r["ticker"], r["asset_class"])
-        df = enriched.get(key, (None,))[0]
-        scores = scores_map.get(key)
+        df, scores = _enriched_df_and_scores(enriched, scores_map, r)
         if df is None or scores is None: continue
 
         oos = run_per_ticker_oos(df, scores, r["asset_class"], r["currency"],
                                  SCORE_THRESHOLD, HOLD_TRADING_DAYS)
         if oos is None: continue
         full, train, test = oos
-        if full["n"] < MIN_STOCK_BT_TRADES:  continue
-        if full["avg"] is None or full["avg"] <= 0: continue
         if STOCK_REQUIRE_OOS:
-            if test["n"] < MIN_TEST_TRADES: continue
-            if test["avg"] is None or test["avg"] <= 0: continue
-            if train["avg"] is None or train["avg"] <= 0: continue
+            if not _oos_gate_ok(full, train, test, min_full=MIN_STOCK_BT_TRADES,
+                                min_test=MIN_TEST_TRADES, require_train=True):
+                continue
+        else:
+            if full["n"] < MIN_STOCK_BT_TRADES: continue
+            if full["avg"] is None or full["avg"] <= 0: continue
 
         sl_price, tp_price, rr = trade_levels(
             r["price"], r["vol_2w_pct"], r["predicted_move_pct"], STOP_LOSS_VOL_FRAC)
@@ -1888,6 +1966,9 @@ def build_stock_recommendations(scan_rows, enriched, scores_map, robust_classes,
             "test_trades": test["n"], "test_win_rate": test["win_rate"], "test_avg": test["avg"],
             "earnings_warning": earn_warn,
         })
+    recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
+                     roi_key="expected_roi_pct", notional_key="notional",
+                     full_avg_key="bt_avg", test_avg_key="test_avg")
     recs.sort(key=lambda x: (x["expected_roi_pct"], x["bt_avg"]), reverse=True)
     return recs[:N_STOCK_RECOMMENDATIONS]
 
@@ -1924,9 +2005,7 @@ def build_crypto_weekly_recommendations(scan_rows, enriched, scores_map,
         if scaled_pred < CRYPTO_WEEKLY_MIN_PREDICTED_PCT: continue
         diag["predicted_move"] += 1
 
-        key = (r["ticker"], r["asset_class"])
-        df = enriched.get(key, (None,))[0]
-        scores = scores_map.get(key)
+        df, scores = _enriched_df_and_scores(enriched, scores_map, r)
         if df is None or scores is None:
             diag["oos_missing"] += 1
             continue
@@ -1987,6 +2066,9 @@ def build_crypto_weekly_recommendations(scan_rows, enriched, scores_map,
             "bt_avg": full["avg"], "bt_total": full["total"],
             "test_trades": test["n"], "test_win_rate": test["win_rate"], "test_avg": test["avg"],
         })
+    recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
+                     roi_key="expected_roi_pct", notional_key="notional",
+                     full_avg_key="bt_avg", test_avg_key="test_avg")
     recs.sort(key=lambda x: (x["expected_roi_pct"], x["bt_avg"]), reverse=True)
     if CRYPTO_FILTER_DIAGNOSTIC:
         print(f"{C.CYAN}[CRYPTO WEEKLY FUNNEL]{C.RESET} "
@@ -2132,6 +2214,10 @@ def build_daytrade_recommendations(scan_rows, enriched, day_scores_map):
         if best is not None:
             recs.append(best)
 
+    recalibrate_recs(recs, move_key="daytrade_predicted_move_pct",
+                     net_key="daytrade_predicted_net_eur", roi_key="daytrade_expected_roi_pct",
+                     notional_key="daytrade_notional",
+                     full_avg_key="daytrade_bt_avg", test_avg_key="daytrade_test_avg")
     recs.sort(key=lambda x: (x["daytrade_expected_roi_pct"], x["daytrade_test_avg"]),
               reverse=True)
     return recs[:N_DAYTRADE_RECOMMENDATIONS]
@@ -2189,6 +2275,10 @@ def build_stock_daytrade_recommendations(scan_rows, enriched, day_scores_map):
         if best is not None:
             recs.append(best)
 
+    recalibrate_recs(recs, move_key="daytrade_predicted_move_pct",
+                     net_key="daytrade_predicted_net_eur", roi_key="daytrade_expected_roi_pct",
+                     notional_key="daytrade_notional",
+                     full_avg_key="stock_dt_full_avg", test_avg_key="stock_dt_test_avg")
     recs.sort(key=lambda x: (x["daytrade_expected_roi_pct"], x.get("stock_dt_test_avg", 0)),
               reverse=True)
     return recs[:N_STOCK_DAYTRADE_RECOMMENDATIONS]
@@ -2257,6 +2347,10 @@ def build_crypto_daytrade_recommendations(scan_rows, enriched, day_scores_map):
             recs.append(best)
             diag["passed"] += 1
 
+    recalibrate_recs(recs, move_key="daytrade_predicted_move_pct",
+                     net_key="daytrade_predicted_net_eur", roi_key="daytrade_expected_roi_pct",
+                     notional_key="daytrade_notional",
+                     full_avg_key="crypto_dt_full_avg", test_avg_key="crypto_dt_test_avg")
     recs.sort(key=lambda x: (x["daytrade_expected_roi_pct"], x.get("crypto_dt_test_avg", 0)),
               reverse=True)
     if CRYPTO_FILTER_DIAGNOSTIC:
@@ -2356,6 +2450,9 @@ def build_crypto_mean_reversion_recommendations(scan_rows, enriched):
             recs.append(best)
             diag["passed"] += 1
 
+    recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
+                     roi_key="expected_roi_pct", notional_key="notional",
+                     full_avg_key="mr_full_avg", test_avg_key="mr_test_avg")
     recs.sort(key=lambda x: (x["expected_roi_pct"], x.get("mr_test_avg", 0)), reverse=True)
     if CRYPTO_FILTER_DIAGNOSTIC:
         print(f"{C.CYAN}[CRYPTO MEAN-REVERSION FUNNEL]{C.RESET} "
@@ -2481,6 +2578,10 @@ def build_crypto_intraday_recommendations(crypto_candidates, regime_series, hour
             recs.append(best)
             diag["passed"] += 1
 
+    recalibrate_recs(recs, move_key="intraday_predicted_move_pct",
+                     net_key="intraday_predicted_net_eur", roi_key="intraday_expected_roi_pct",
+                     notional_key="intraday_notional",
+                     full_avg_key="intraday_bt_avg", test_avg_key="intraday_test_avg")
     recs.sort(key=lambda x: (x["intraday_expected_roi_pct"], x.get("intraday_test_avg", 0)),
               reverse=True)
     if CRYPTO_FILTER_DIAGNOSTIC:
@@ -2511,9 +2612,7 @@ def build_week_recommendations(scan_rows, enriched, scores_map, oos_results, oos
         scaled_vol = r["vol_2w_pct"] * np.sqrt(WEEK_HOLD_DAYS / HOLD_TRADING_DAYS)
         scaled_pred = r["confidence"] * scaled_vol * 0.7
 
-        key = (r["ticker"], r["asset_class"])
-        df = enriched.get(key, (None,))[0]
-        scores = scores_map.get(key)
+        df, scores = _enriched_df_and_scores(enriched, scores_map, r)
         if df is None or scores is None: continue
 
         # Per-ticker OOS at the 5-day horizon
@@ -2521,10 +2620,9 @@ def build_week_recommendations(scan_rows, enriched, scores_map, oos_results, oos
                                         SCORE_THRESHOLD, WEEK_HOLD_DAYS)
         if oos_ticker is None: continue
         full, train, test = oos_ticker
-        if full["n"] < MIN_TRADES_FOR_REPORT: continue
-        if full["avg"] is None or full["avg"] <= 0: continue
-        if test["n"] < MIN_TEST_TRADES: continue
-        if test["avg"] is None or test["avg"] <= 0: continue
+        if not _oos_gate_ok(full, train, test, min_full=MIN_TRADES_FOR_REPORT,
+                            min_test=MIN_TEST_TRADES, require_train=False):
+            continue
 
         # Project P/L at the 5-day horizon
         units = UNITS_PER_TRADE
@@ -2562,6 +2660,9 @@ def build_week_recommendations(scan_rows, enriched, scores_map, oos_results, oos
             "week_test_avg": test["avg"],
             "oos_class_thr": oos_lookup.get(r["asset_class"], {}).get("thr"),
         })
+    recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
+                     roi_key="expected_roi_pct", notional_key="notional",
+                     full_avg_key="week_bt_avg", test_avg_key="week_test_avg")
     recs.sort(key=lambda x: x["expected_roi_pct"], reverse=True)
     return recs[:N_WEEK_RECOMMENDATIONS]
 
@@ -2582,9 +2683,7 @@ def build_stock_week_recommendations(scan_rows, enriched, scores_map, robust_cla
         notional = r["price"] * units
         if notional < STOCK_DAYTRADE_MIN_NOTIONAL: continue
 
-        key = (r["ticker"], r["asset_class"])
-        df = enriched.get(key, (None,))[0]
-        scores = scores_map.get(key)
+        df, scores = _enriched_df_and_scores(enriched, scores_map, r)
         if df is None or scores is None: continue
 
         oos = run_per_ticker_oos(df, scores, "stock", r["currency"],
@@ -2592,11 +2691,9 @@ def build_stock_week_recommendations(scan_rows, enriched, scores_map, robust_cla
                                  target_notional=STOCK_DAYTRADE_NOTIONAL_EUR)
         if oos is None: continue
         full, train, test = oos
-        if full["n"] < MIN_STOCK_WEEK_TRADES: continue
-        if full["avg"] is None or full["avg"] <= 0: continue
-        if test["n"] < MIN_STOCK_WEEK_TEST_TRADES: continue
-        if test["avg"] is None or test["avg"] <= 0: continue
-        if train["avg"] is None or train["avg"] <= 0: continue
+        if not _oos_gate_ok(full, train, test, min_full=MIN_STOCK_WEEK_TRADES,
+                            min_test=MIN_STOCK_WEEK_TEST_TRADES, require_train=True):
+            continue
 
         scaled_vol = r["vol_2w_pct"] * np.sqrt(STOCK_WEEK_HOLD_DAYS / HOLD_TRADING_DAYS)
         scaled_pred = r["confidence"] * scaled_vol * 0.7
@@ -2630,6 +2727,9 @@ def build_stock_week_recommendations(scan_rows, enriched, scores_map, robust_cla
             "sw_test_trades": test["n"], "sw_test_win_rate": test["win_rate"],
             "sw_test_avg": test["avg"],
         })
+    recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
+                     roi_key="expected_roi_pct", notional_key="notional",
+                     full_avg_key="sw_full_avg", test_avg_key="sw_test_avg")
     recs.sort(key=lambda x: (x["expected_roi_pct"], x["sw_test_avg"]), reverse=True)
     return recs[:N_STOCK_WEEK_RECOMMENDATIONS]
 
@@ -2765,6 +2865,10 @@ def build_stock_intraday_recommendations(stock_candidates, regime_series, hourly
         if best is not None:
             recs.append(best)
 
+    recalibrate_recs(recs, move_key="intraday_predicted_move_pct",
+                     net_key="intraday_predicted_net_eur", roi_key="intraday_expected_roi_pct",
+                     notional_key="intraday_notional",
+                     full_avg_key="intraday_bt_avg", test_avg_key="intraday_test_avg")
     recs.sort(key=lambda x: (x["intraday_expected_roi_pct"], x.get("intraday_test_avg", 0)),
               reverse=True)
     return recs[:N_STOCK_INTRADAY_RECOMMENDATIONS]
@@ -2807,379 +2911,488 @@ def _header(text):
     return f"{C.BOLD}{C.CYAN}{text}{C.RESET}"
 
 
+# --- Console styling helpers (shared across all recommendation printers) ---
+_KV_LABEL_W = 21
+
+
 def _section_header(title: str) -> str:
-    """Return a styled console section header with Unicode rules."""
-    bar = "─" * 135
+    """Return a boxed, colored console section header."""
+    inner = max(96, len(title) + 2)
+    top = "┏" + "━" * (inner + 2) + "┓"
+    bot = "┗" + "━" * (inner + 2) + "┛"
     if NO_COLOR:
-        return f"\n{bar}\n  {title}\n{bar}"
-    return f"\n{C.CYAN}{bar}{C.RESET}\n{C.BOLD}{C.CYAN}  {title}{C.RESET}\n{C.CYAN}{bar}{C.RESET}"
+        return f"\n{top}\n┃ {title.ljust(inner)} ┃\n{bot}"
+    return (f"\n{C.CYAN}{top}{C.RESET}\n"
+            f"{C.CYAN}┃{C.RESET} {C.BOLD}{C.CYAN}{title.ljust(inner)}{C.RESET} {C.CYAN}┃{C.RESET}\n"
+            f"{C.CYAN}{bot}{C.RESET}")
+
+
+def _note(text: str) -> str:
+    """Dim explanatory text shown just under a section header."""
+    return f"  {C.DIM}{text}{C.RESET}"
+
+
+def _empty_note(text: str) -> str:
+    """A friendly 'nothing matched' line for empty recommendation lists."""
+    return f"\n  {C.YELLOW}•{C.RESET} {C.DIM}{text}{C.RESET}"
+
+
+def _kv(label: str, value: str) -> str:
+    """An aligned 'label   value' row for a recommendation card."""
+    return f"     {C.GREY}{label.ljust(_KV_LABEL_W)}{C.RESET}{value}"
+
+
+def _score_stars(score) -> str:
+    filled = min(5, max(0, int(score) - 2))
+    color = C.GREEN if score >= 6 else (C.YELLOW if score >= 4 else C.GREY)
+    return f"{color}{'★' * filled}{C.GREY}{'☆' * (5 - filled)}{C.RESET}"
+
+
+def _market_badge(r) -> str:
+    label = _market_short_label(r)
+    if label == "OPEN":
+        return f"{C.BG_GREEN}{C.BOLD} OPEN {C.RESET}"
+    if label == "24/7":
+        return f"{C.GREEN}{C.BOLD} 24/7 {C.RESET}"
+    return f"{C.BG_YELLOW}{C.BOLD} CLOSED {C.RESET}"
+
+
+def _rr_value(rr) -> str:
+    if rr is None or (isinstance(rr, float) and np.isnan(rr)):
+        return f"{C.GREY}n/a{C.RESET}"
+    color = C.GREEN if rr >= 1.5 else (C.YELLOW if rr >= 1.0 else C.RED)
+    return f"{color}{C.BOLD}{rr:.2f} : 1{C.RESET}"
+
+
+def _winrate(wr) -> str:
+    color = C.GREEN if wr >= 55 else (C.YELLOW if wr >= 45 else C.RED)
+    return f"{color}{wr:.1f}%{C.RESET}"
+
+
+def _backtest_value(n, wr, avg) -> str:
+    return (f"{C.BOLD}{int(n)}{C.RESET} trades   win {_winrate(wr)}   "
+            f"avg {colorize_pct(avg, width=0)}")
+
+
+def _price(value, currency, decimals=4) -> str:
+    return f"{C.BOLD}{value:.{decimals}f}{C.RESET} {C.GREY}{currency}{C.RESET}"
+
+
+def _roi_row(roi_pct, net_eur, suffix="") -> str:
+    """The headline expected-ROI row, made to stand out."""
+    arrow = f"{C.GREEN}▲{C.RESET}" if roi_pct > 0 else f"{C.RED}▼{C.RESET}"
+    body = (f"{C.BOLD}EXPECTED NET ROI{C.RESET}   "
+            f"{arrow} {colorize_pct(roi_pct, width=0)}   "
+            f"{C.GREY}→{C.RESET} {colorize_money(net_eur, width=0)}{suffix}")
+    return f"     {body}"
+
+
+def _leverage_badge(r) -> str:
+    lev = r.get("leverage", 1.0) or 1.0
+    if lev <= 1.0:
+        return ""
+    return f"  {C.MAGENTA}{C.BOLD}⚡{lev:.0f}:1{C.RESET}"
+
+
+def _card_header(i, r, *, extra: str = "", stars: bool = False) -> None:
+    name = f"{C.BOLD}{C.WHITE}{r['name']}{C.RESET}"
+    meta = f"{C.GREY}{r['ticker']} · {r['asset_class']}{C.RESET}"
+    star = f"  {_score_stars(r['score'])}" if stars else ""
+    print()
+    print(f"  {C.CYAN}{C.BOLD}#{i}{C.RESET}  {name}  {meta}{star}{_leverage_badge(r)}  "
+          f"{_market_badge(r)}{extra}")
+    print(f"  {C.GREY}{'─' * 78}{C.RESET}")
+    lev = r.get("leverage", 1.0) or 1.0
+    margin = r.get("margin_eur")
+    if lev > 1.0 and margin:
+        print(_kv("Margin posted", f"{C.BOLD}{margin:.0f}{C.RESET} {C.GREY}{r.get('currency','')}{C.RESET}"
+                  f"   {C.DIM}controls {margin*lev:.0f} notional at {lev:.0f}:1 leverage "
+                  f"(overnight financing charged on notional){C.RESET}"))
+
+
+def _signal_value(signals: str) -> str:
+    short = (signals[:108] + '…') if len(signals) > 108 else signals
+    return f"{C.DIM}{short}{C.RESET}"
 
 
 def print_recommendations(recs, robust, weak):
     robust_display = sorted(cls for cls in robust if not cls.startswith("crypto_"))
     weak_display = sorted(cls for cls in weak if not cls.startswith("crypto_"))
     print(_section_header("CONCRETE TRADING RECOMMENDATIONS — 2-week net ROI (mixed asset classes, excl. crypto)"))
-    print(f"\n  Filter applied:")
-    print(f"   1. Asset class must have OOS verdict = ROBUST"
-          f"{' or WEAK' if ALLOW_WEAK_CLASSES else ''}")
-    print(f"   2. Current scan score must be ≥ {MIN_SCORE_FOR_REC}")
-    print(f"   3. Predicted net profit after fees must be > 0; reward:risk ≥ {MIN_RR_RATIO}")
-    print(f"\n  Robust asset classes today: "
-          f"{', '.join(robust_display) if robust_display else '(none)'}")
+    print()
+    print(_note("Filter: OOS verdict ROBUST"
+                f"{' or WEAK' if ALLOW_WEAK_CLASSES else ''}"
+                f"  ·  scan score ≥ {MIN_SCORE_FOR_REC}"
+                f"  ·  net profit after fees > 0  ·  reward:risk ≥ {MIN_RR_RATIO}"))
+    robust_txt = ', '.join(robust_display) if robust_display else '(none)'
+    print(_note(f"Robust classes today: {C.GREEN}{robust_txt}{C.RESET}{C.DIM}"))
     if weak_display:
-        print(f"  Weak classes (excluded): {', '.join(weak_display)}")
+        print(_note(f"Weak classes (excluded): {C.YELLOW}{', '.join(weak_display)}{C.RESET}"))
     if not recs:
-        print("\n  No instrument currently shows a bullish signal strong enough to meet the criteria.")
+        print(_empty_note("No instrument shows a bullish signal strong enough to meet the criteria."))
         return
     for i, r in enumerate(recs, 1):
-        stars = "*" * min(5, max(1, r["score"] - 2))
         drift = _drift_note(r.get("close_at_scan"), r["price"])
         tag = _status_tag(r)
-        print()
-        print(f"  -- #{i}  {stars:<5}  {tag}{C.BOLD}{r['name']}{C.RESET}  ({r['ticker']} / {r['asset_class']}) " + "-"*20)
+        _card_header(i, r, extra=(f"  {tag}".rstrip() if tag else ""), stars=True)
         _print_market_line(r)
-        print(f"     Direction:           LONG (BUY 1 piece)")
-        print(f"     LIVE entry price:    {C.BOLD}{r['price']:>10.4f} {r['currency']}{C.RESET}  {drift}")
-        print(f"     Signal score:        {r['score']}     RSI: {r['rsi']:.1f}     "
-              f"ADX: {r['adx']:.1f}     Regime: {r['regime']:+d}")
-        sig_short = (r['signals'][:110] + '...') if len(r['signals']) > 110 else r['signals']
-        print(f"     Active signals:      {sig_short}")
-        print(f"     Predicted move:      {colorize_pct(r['predicted_move_pct'])}")
-        print(f"     Total fees:          {r['total_fees']:>7.2f} EUR  (break-even {colorize_pct(r['breakeven_pct'])})")
-        print(f"     {C.BOLD}>> EXPECTED NET ROI: {colorize_pct(r['expected_roi_pct'])}  ->  "
-              f"{colorize_money(r['predicted_net_eur'])} per piece{C.RESET}")
-        print(f"     Take-profit price:   {C.GREEN}{r['take_profit_price']:>10.4f}{C.RESET} {r['currency']}")
-        print(f"     Stop-loss price:     {C.RED}{r['stop_loss_price']:>10.4f}{C.RESET} {r['currency']}")
+        print(_kv("Direction", f"{C.GREEN}LONG{C.RESET}  {C.DIM}(BUY 1 piece){C.RESET}"))
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'])}  {drift}"))
+        print(_kv("Score / RSI / ADX", f"{C.BOLD}{r['score']}{C.RESET}   "
+                  f"{C.GREY}RSI{C.RESET} {r['rsi']:.1f}   {C.GREY}ADX{C.RESET} {r['adx']:.1f}   "
+                  f"{C.GREY}Regime{C.RESET} {r['regime']:+d}"))
+        print(_kv("Active signals", _signal_value(r['signals'])))
+        print(_kv("Predicted move", colorize_pct(r['predicted_move_pct'], width=0)))
+        print(_kv("Total fees", f"{r['total_fees']:.2f} {r['currency']}   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['breakeven_pct'], width=0)}"))
+        print(_roi_row(r['expected_roi_pct'], r['predicted_net_eur'], suffix=f" {C.DIM}per piece{C.RESET}"))
+        print(_kv("Take-profit", f"{C.GREEN}{r['take_profit_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['stop_loss_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
         if not np.isnan(r["risk_reward"]):
-            rr_color = C.GREEN if r['risk_reward'] >= 1.5 else (C.YELLOW if r['risk_reward'] >= 1.0 else C.RED)
-            print(f"     Reward:risk ratio:   {rr_color}{r['risk_reward']:.2f} : 1{C.RESET}")
+            print(_kv("Reward : risk", _rr_value(r['risk_reward'])))
         print(_earnings_warning(r), end="")
 
 def print_stock_recommendations(recs):
     print(_section_header("CASH STOCK SWING RECOMMENDATIONS — 10 trading days, regular stocks only"))
     if not recs:
-        print("\n  No stock candidates passed the stock-specific filter today.")
+        print(_empty_note("No stock candidates passed the stock-specific filter today."))
         return
     for i, r in enumerate(recs, 1):
         drift = _drift_note(r.get("close_at_scan"), r["price"])
-        print()
-        print(f"  #{i} {r['name']} ({r['ticker']})")
+        _card_header(i, r, stars=True)
         _print_market_line(r)
-        print(f"     LIVE entry price:    {r['price']:>10.4f} {r['currency']}  {drift}")
-        print(f"     Signal score:        {r['score']}     RSI: {r['rsi']:.1f}     "
-              f"ADX: {r['adx']:.1f}     Regime: {r['regime']:+d}")
-        print(f"     Predicted move:      {r['predicted_move_pct']:>+7.2f}%")
-        print(f"     Expected net ROI:    {r['expected_roi_pct']:>+7.2f}%  -> {r['predicted_net_eur']:>+7.2f} EUR per share")
-        print(f"     Take-profit price:   {r['take_profit_price']:>10.4f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['stop_loss_price']:>10.4f} {r['currency']}")
-        print(f"     Full backtest:       {int(r['bt_trades'])} trades, {r['bt_win_rate']:.1f}% win rate, avg {r['bt_avg']:+.2f}%")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'])}  {drift}"))
+        print(_kv("Score / RSI / ADX", f"{C.BOLD}{r['score']}{C.RESET}   "
+                  f"{C.GREY}RSI{C.RESET} {r['rsi']:.1f}   {C.GREY}ADX{C.RESET} {r['adx']:.1f}   "
+                  f"{C.GREY}Regime{C.RESET} {r['regime']:+d}"))
+        print(_kv("Predicted move", colorize_pct(r['predicted_move_pct'], width=0)))
+        print(_roi_row(r['expected_roi_pct'], r['predicted_net_eur'], suffix=f" {C.DIM}per share{C.RESET}"))
+        print(_kv("Take-profit", f"{C.GREEN}{r['take_profit_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['stop_loss_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Full backtest", _backtest_value(r['bt_trades'], r['bt_win_rate'], r['bt_avg'])))
         if r.get("test_trades", 0):
-            print(f"     Recent test split:   {int(r['test_trades'])} trades, {r['test_win_rate']:.1f}% win rate, avg {r['test_avg']:+.2f}%")
+            print(_kv("Recent test split", _backtest_value(r['test_trades'], r['test_win_rate'], r['test_avg'])))
 
 def print_crypto_weekly_recommendations(recs):
     print(_section_header(
         f"CRYPTO WEEKLY RECOMMENDATIONS — {CRYPTO_WEEKLY_HOLD_DAYS}-day hold, "
         f"base €{CRYPTO_NOTIONAL_EUR:.0f} ATR-adjusted sizing, fee={CRYPTO_FEE_PCT*100:.2f}%/side"
     ))
-    print(f"\n  Predicted move must clear {CRYPTO_WEEKLY_MIN_PREDICTED_PCT:.1f}% "
-        f"(round-trip fee is {2*CRYPTO_FEE_PCT*100:.2f}% of position notional)")
+    print()
+    print(_note(f"Predicted move must clear {CRYPTO_WEEKLY_MIN_PREDICTED_PCT:.1f}% "
+                f"(round-trip fee is {2*CRYPTO_FEE_PCT*100:.2f}% of position notional)"))
     if not recs:
-        print("\n  No crypto candidates passed the weekly filter today.")
+        print(_empty_note("No crypto candidates passed the weekly filter today."))
         return
     for i, r in enumerate(recs, 1):
         drift = _drift_note(r.get("close_at_scan"), r["price"])
         units = r.get("crypto_units", CRYPTO_NOTIONAL_EUR / r["price"])
-        print()
-        print(f"  #{i} {r['name']} ({r['ticker']})")
+        _card_header(i, r, stars=True)
         _print_market_line(r)
-        print(f"     LIVE entry price:    {r['price']:>14.6f} {r['currency']}  {drift}")
-        print(f"     Position sizing:     BUY {units:.8f} units = ~€{r['notional']:.2f}")
-        print(f"     Hold:                {int(r['hold_days'])} days")
-        print(f"     Signal score:        {r['score']}     RSI: {r['rsi']:.1f}     "
-              f"ADX: {r['adx']:.1f}     Regime: {r['regime']:+d}")
-        print(f"     BTC relative:        7d {r.get('vs_btc_7d_pct', 0.0):+.2f}%     "
-              f"30d {r.get('vs_btc_30d_pct', 0.0):+.2f}%     7d return {r.get('ret7_pct', 0.0):+.2f}%")
-        sig_short = (r['signals'][:110] + '...') if len(r['signals']) > 110 else r['signals']
-        print(f"     Active signals:      {sig_short}")
-        print(f"     Predicted move:      {r['predicted_move_pct']:>+7.2f}%   "
-              f"(confidence={r['confidence']:.2f}, {r['hold_days']}d vol={r['vol_2w_pct']:.1f}%)")
-        print(f"     Fees:                {r['total_fees']:>7.2f} EUR  (break-even {r['breakeven_pct']:+.2f}%)")
-        print(f"     >> Expected net ROI: {r['expected_roi_pct']:>+7.2f}%   "
-              f"-> {r['predicted_net_eur']:>+7.2f} EUR on €{r['notional']:.0f}")
-        print(f"     Upside (+1 vol):     {r['bull_case_net_eur']:>+7.2f} EUR     "
-              f"Downside (-1 vol): {r['bear_case_net_eur']:>+7.2f} EUR")
-        print(f"     Take-profit price:   {r['take_profit_price']:>14.6f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['stop_loss_price']:>14.6f} {r['currency']}")
-        print(f"     Reward:risk ratio:   {r['risk_reward']:.2f} : 1")
-        print(f"     Full backtest:       {int(r['bt_trades'])} trades, {r['bt_win_rate']:.1f}% win rate, avg {r['bt_avg']:+.2f}%")
-        print(f"     Recent test split:   {int(r['test_trades'])} trades, {r['test_win_rate']:.1f}% win rate, avg {r['test_avg']:+.2f}%")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'], 6)}  {drift}"))
+        print(_kv("Position sizing", f"{C.GREEN}BUY{C.RESET} {units:.8f} units   "
+                  f"{C.GREY}≈{C.RESET} €{r['notional']:.2f}   {C.GREY}hold{C.RESET} {int(r['hold_days'])}d"))
+        print(_kv("Score / RSI / ADX", f"{C.BOLD}{r['score']}{C.RESET}   "
+                  f"{C.GREY}RSI{C.RESET} {r['rsi']:.1f}   {C.GREY}ADX{C.RESET} {r['adx']:.1f}   "
+                  f"{C.GREY}Regime{C.RESET} {r['regime']:+d}"))
+        print(_kv("BTC relative", f"{C.GREY}7d{C.RESET} {colorize_pct(r.get('vs_btc_7d_pct', 0.0), width=0)}   "
+                  f"{C.GREY}30d{C.RESET} {colorize_pct(r.get('vs_btc_30d_pct', 0.0), width=0)}   "
+                  f"{C.GREY}7d ret{C.RESET} {colorize_pct(r.get('ret7_pct', 0.0), width=0)}"))
+        print(_kv("Active signals", _signal_value(r['signals'])))
+        print(_kv("Predicted move", f"{colorize_pct(r['predicted_move_pct'], width=0)}   "
+                  f"{C.DIM}(confidence {r['confidence']:.2f}, {r['hold_days']}d vol {r['vol_2w_pct']:.1f}%){C.RESET}"))
+        print(_kv("Fees", f"{r['total_fees']:.2f} EUR   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['breakeven_pct'], width=0)}"))
+        print(_roi_row(r['expected_roi_pct'], r['predicted_net_eur'], suffix=f" {C.DIM}on €{r['notional']:.0f}{C.RESET}"))
+        print(_kv("Upside / downside", f"{colorize_money(r['bull_case_net_eur'], width=0)} "
+                  f"{C.GREY}/{C.RESET} {colorize_money(r['bear_case_net_eur'], width=0)}"))
+        print(_kv("Take-profit", f"{C.GREEN}{r['take_profit_price']:.6f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['stop_loss_price']:.6f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Reward : risk", _rr_value(r['risk_reward'])))
+        print(_kv("Full backtest", _backtest_value(r['bt_trades'], r['bt_win_rate'], r['bt_avg'])))
+        print(_kv("Recent test split", _backtest_value(r['test_trades'], r['test_win_rate'], r['test_avg'])))
 
 def print_crypto_weekly_trade_suggestions(suggestions):
     print(_section_header(f"CRYPTO WEEKLY TRADE SUGGESTIONS — actionable {CRYPTO_WEEKLY_HOLD_DAYS}-day BUY/TP/SL rows"))
     if not suggestions:
-        print("\n  No crypto weekly trade suggestions generated today.")
+        print(_empty_note("No crypto weekly trade suggestions generated today."))
         return
-    print(f"{'#':<4}{'Action':<7}{'Coin':<18}{'Mkt':>8}{'Entry':>14}{'Size€':>9}{'Units':>14}"
-          f"{'TP':>14}{'SL':>14}{'Exp€':>10}{'Risk€':>10}{'R:R':>7}")
-    print("-"*135)
+    header = (f"{'#':<4}{'Action':<7}{'Coin':<18}{'Mkt':>8}{'Entry':>14}{'Size€':>9}{'Units':>14}"
+              f"{'TP':>14}{'SL':>14}{'Exp€':>10}{'Risk€':>10}{'R:R':>7}")
+    print()
+    print(f"  {C.BOLD}{C.CYAN}{header}{C.RESET}")
+    print(f"  {C.GREY}{'─' * len(header)}{C.RESET}")
     for i, r in enumerate(suggestions, 1):
-        print(f"{i:<4}{r['action']:<7}{r['name'][:17]:<18}"
+        exp = colorize_money(r['expected_net_eur'], width=8, decimals=2)
+        risk = colorize_money(r['max_loss_if_sl_eur'], width=8, decimals=2)
+        print(f"  {C.CYAN}{i:<4}{C.RESET}{C.BOLD}{r['action']:<7}{C.RESET}{r['name'][:17]:<18}"
               f"{_market_short_label(r):>8}{r['entry_price']:>14.6f}{r['notional_eur']:>9.2f}{r['units']:>14.8f}"
-              f"{r['take_profit_price']:>14.6f}{r['stop_loss_price']:>14.6f}"
-              f"{r['expected_net_eur']:>+10.2f}{r['max_loss_if_sl_eur']:>+10.2f}"
-              f"{r['risk_reward']:>7.2f}")
-    print("\n  Market details:")
+              f"{C.GREEN}{r['take_profit_price']:>14.6f}{C.RESET}{C.RED}{r['stop_loss_price']:>14.6f}{C.RESET}"
+              f"  {exp}  {risk}    {_rr_value(r['risk_reward'])}")
+    print()
+    print(_note("Market details:"))
     for r in suggestions:
-        print(f"   - {r['ticker']}: {r['market_note']}")
-    print(f"\n  Saved to {CRYPTO_WEEKLY_TRADE_SUGGESTIONS_CSV}")
+        print(f"   {C.GREY}·{C.RESET} {C.BOLD}{r['ticker']}{C.RESET}: {C.DIM}{r['market_note']}{C.RESET}")
+    print(_note(f"Saved to {CRYPTO_WEEKLY_TRADE_SUGGESTIONS_CSV}"))
 
 def print_daytrade_recommendations(recs):
     print(_section_header("DAYTRADE RECOMMENDATIONS (mixed, excl. crypto) — 1-3 trading days"))
     if not recs:
-        print("\n  No 1-3 day candidates passed the fee-aware filter today.")
+        print(_empty_note("No 1-3 day candidates passed the fee-aware filter today."))
         return
     for i, r in enumerate(recs, 1):
         label = "share" if r["asset_class"] == "stock" else "piece"
         drift = _drift_note(r.get("close_at_scan"), r["price"])
-        print()
-        print(f"  #{i} {r['name']} ({r['ticker']} / {r['asset_class']})")
+        _card_header(i, r, stars=True)
         _print_market_line(r)
-        print(f"     Suggested hold:      {int(r['hold_days'])} trading day(s)")
-        print(f"     LIVE entry price:    {r['price']:>10.4f} {r['currency']}  {drift}")
-        print(f"     Swing/day score:     {r['score']} / {r['daytrade_score']}     "
-              f"RSI: {r['rsi']:.1f}     ADX: {r['adx']:.1f}")
-        print(f"     Predicted move:      {r['daytrade_predicted_move_pct']:>+7.2f}%")
-        print(f"     Fees:                {r['daytrade_fees_eur']:>7.2f} EUR  (break-even {r['daytrade_breakeven_pct']:+.2f}%)")
-        print(f"     Expected net ROI:    {r['daytrade_expected_roi_pct']:>+7.2f}%   -> {r['daytrade_predicted_net_eur']:>+7.2f} EUR per {label}")
-        print(f"     Take-profit price:   {r['daytrade_take_profit_price']:>10.4f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['daytrade_stop_loss_price']:>10.4f} {r['currency']}")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'])}  {drift}"
+                  f"   {C.GREY}hold{C.RESET} {int(r['hold_days'])}d"))
+        print(_kv("Swing / day score", f"{C.BOLD}{r['score']}{C.RESET} {C.GREY}/{C.RESET} "
+                  f"{C.BOLD}{r['daytrade_score']}{C.RESET}   {C.GREY}RSI{C.RESET} {r['rsi']:.1f}   "
+                  f"{C.GREY}ADX{C.RESET} {r['adx']:.1f}"))
+        print(_kv("Predicted move", colorize_pct(r['daytrade_predicted_move_pct'], width=0)))
+        print(_kv("Fees", f"{r['daytrade_fees_eur']:.2f} EUR   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['daytrade_breakeven_pct'], width=0)}"))
+        print(_roi_row(r['daytrade_expected_roi_pct'], r['daytrade_predicted_net_eur'],
+                       suffix=f" {C.DIM}per {label}{C.RESET}"))
+        print(_kv("Take-profit", f"{C.GREEN}{r['daytrade_take_profit_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['daytrade_stop_loss_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
         if not np.isnan(r["daytrade_risk_reward"]):
-            print(f"     Reward:risk ratio:   {r['daytrade_risk_reward']:.2f} : 1")
-        print(f"     Full backtest:       {int(r['daytrade_bt_trades'])} trades, {r['daytrade_bt_win_rate']:.1f}% win rate, avg {r['daytrade_bt_avg']:+.2f}%")
-        print(f"     Recent test split:   {int(r['daytrade_test_trades'])} trades, {r['daytrade_test_win_rate']:.1f}% win rate, avg {r['daytrade_test_avg']:+.2f}%")
+            print(_kv("Reward : risk", _rr_value(r['daytrade_risk_reward'])))
+        print(_kv("Full backtest", _backtest_value(r['daytrade_bt_trades'], r['daytrade_bt_win_rate'], r['daytrade_bt_avg'])))
+        print(_kv("Recent test split", _backtest_value(r['daytrade_test_trades'], r['daytrade_test_win_rate'], r['daytrade_test_avg'])))
 
 def print_stock_daytrade_recommendations(recs):
     print(_section_header(f"STOCK DAYTRADE RECOMMENDATIONS — cash stocks only, ~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position"))
     if not recs:
-        print("\n  No cash stock passed the daytrade filter today.")
+        print(_empty_note("No cash stock passed the daytrade filter today."))
         return
     for i, r in enumerate(recs, 1):
         units = int(r["daytrade_units"])
         drift = _drift_note(r.get("close_at_scan"), r["price"])
-        print()
-        print(f"  #{i} {r['name']} ({r['ticker']})")
+        _card_header(i, r, stars=True)
         _print_market_line(r)
-        print(f"     Suggested hold:      {int(r['hold_days'])} trading day(s)")
-        print(f"     LIVE entry price:    {r['price']:>10.4f} {r['currency']}  {drift}")
-        print(f"     Position sizing:     BUY {units} shares = ~{r['daytrade_notional']:.0f} {r['currency']}")
-        print(f"     Swing/day score:     {r['score']} / {r['daytrade_score']}     "
-              f"RSI: {r['rsi']:.1f}     ADX: {r['adx']:.1f}")
-        print(f"     Predicted move:      {r['daytrade_predicted_move_pct']:>+7.2f}%")
-        print(f"     Expected net ROI:    {r['daytrade_expected_roi_pct']:>+7.2f}%   -> {r['daytrade_predicted_net_eur']:>+7.2f} EUR")
-        print(f"     Take-profit price:   {r['daytrade_take_profit_price']:>10.4f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['daytrade_stop_loss_price']:>10.4f} {r['currency']}")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'])}  {drift}"
+                  f"   {C.GREY}hold{C.RESET} {int(r['hold_days'])}d"))
+        print(_kv("Position sizing", f"{C.GREEN}BUY{C.RESET} {units} shares   "
+                  f"{C.GREY}≈{C.RESET} {r['daytrade_notional']:.0f} {r['currency']}"))
+        print(_kv("Swing / day score", f"{C.BOLD}{r['score']}{C.RESET} {C.GREY}/{C.RESET} "
+                  f"{C.BOLD}{r['daytrade_score']}{C.RESET}   {C.GREY}RSI{C.RESET} {r['rsi']:.1f}   "
+                  f"{C.GREY}ADX{C.RESET} {r['adx']:.1f}"))
+        print(_kv("Predicted move", colorize_pct(r['daytrade_predicted_move_pct'], width=0)))
+        print(_roi_row(r['daytrade_expected_roi_pct'], r['daytrade_predicted_net_eur']))
+        print(_kv("Take-profit", f"{C.GREEN}{r['daytrade_take_profit_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['daytrade_stop_loss_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
         if not np.isnan(r["daytrade_risk_reward"]):
-            print(f"     Reward:risk ratio:   {r['daytrade_risk_reward']:.2f} : 1")
-        print(f"     Full backtest:       {int(r['stock_dt_full_trades'])} trades, {r['stock_dt_full_win_rate']:.1f}% win rate, avg {r['stock_dt_full_avg']:+.2f}%")
-        print(f"     Test split:          {int(r['stock_dt_test_trades'])} trades, {r['stock_dt_test_win_rate']:.1f}% win rate, avg {r['stock_dt_test_avg']:+.2f}%")
+            print(_kv("Reward : risk", _rr_value(r['daytrade_risk_reward'])))
+        print(_kv("Full backtest", _backtest_value(r['stock_dt_full_trades'], r['stock_dt_full_win_rate'], r['stock_dt_full_avg'])))
+        print(_kv("Test split", _backtest_value(r['stock_dt_test_trades'], r['stock_dt_test_win_rate'], r['stock_dt_test_avg'])))
 
 def print_crypto_daytrade_recommendations(recs):
     print(_section_header(f"CRYPTO DAYTRADE RECOMMENDATIONS — 1-3 day hold, base €{CRYPTO_NOTIONAL_EUR:.0f} ATR-adjusted sizing"))
-    print(f"\n  Predicted move must clear {CRYPTO_DAYTRADE_MIN_PREDICTED_PCT:.1f}% "
-          f"(round-trip fee is {2*CRYPTO_FEE_PCT*100:.2f}% of position notional)")
+    print()
+    print(_note(f"Predicted move must clear {CRYPTO_DAYTRADE_MIN_PREDICTED_PCT:.1f}% "
+                f"(round-trip fee is {2*CRYPTO_FEE_PCT*100:.2f}% of position notional)"))
     if not recs:
-        print("\n  No crypto coin passed the daytrade filter today.")
+        print(_empty_note("No crypto coin passed the daytrade filter today."))
         return
     for i, r in enumerate(recs, 1):
         units = r["daytrade_units"]
         drift = _drift_note(r.get("close_at_scan"), r["price"])
-        print()
-        print(f"  #{i} {r['name']} ({r['ticker']})")
+        _card_header(i, r, stars=True)
         _print_market_line(r)
-        print(f"     Suggested hold:      {int(r['hold_days'])} day(s)")
-        print(f"     LIVE entry price:    {r['price']:>14.6f} {r['currency']}  {drift}")
-        print(f"     Position sizing:     BUY {units:.8f} units = ~€{r['daytrade_notional']:.2f}")
-        print(f"     Swing/day score:     {r['score']} / {r['daytrade_score']}     "
-              f"RSI: {r['rsi']:.1f}     ADX: {r['adx']:.1f}")
-        print(f"     BTC relative:        7d {r.get('vs_btc_7d_pct', 0.0):+.2f}%     "
-              f"30d {r.get('vs_btc_30d_pct', 0.0):+.2f}%     7d return {r.get('ret7_pct', 0.0):+.2f}%")
-        sig_short = (r['daytrade_signals'][:110] + '...') if len(r['daytrade_signals']) > 110 else r['daytrade_signals']
-        print(f"     Active signals:      {sig_short}")
-        print(f"     Predicted move:      {r['daytrade_predicted_move_pct']:>+7.2f}%")
-        print(f"     Fees:                {r['daytrade_fees_eur']:>7.2f} EUR  (break-even {r['daytrade_breakeven_pct']:+.2f}%)")
-        print(f"     >> Expected net ROI: {r['daytrade_expected_roi_pct']:>+7.2f}%   "
-              f"-> {r['daytrade_predicted_net_eur']:>+7.2f} EUR on €{r['daytrade_notional']:.0f}")
-        print(f"     Take-profit price:   {r['daytrade_take_profit_price']:>14.6f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['daytrade_stop_loss_price']:>14.6f} {r['currency']}")
-        print(f"     Reward:risk ratio:   {r['daytrade_risk_reward']:.2f} : 1")
-        print(f"     Full backtest:       {int(r['crypto_dt_full_trades'])} trades, {r['crypto_dt_full_win_rate']:.1f}% win rate, avg {r['crypto_dt_full_avg']:+.2f}%")
-        print(f"     Test split:          {int(r['crypto_dt_test_trades'])} trades, {r['crypto_dt_test_win_rate']:.1f}% win rate, avg {r['crypto_dt_test_avg']:+.2f}%")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'], 6)}  {drift}"
+                  f"   {C.GREY}hold{C.RESET} {int(r['hold_days'])}d"))
+        print(_kv("Position sizing", f"{C.GREEN}BUY{C.RESET} {units:.8f} units   "
+                  f"{C.GREY}≈{C.RESET} €{r['daytrade_notional']:.2f}"))
+        print(_kv("Swing / day score", f"{C.BOLD}{r['score']}{C.RESET} {C.GREY}/{C.RESET} "
+                  f"{C.BOLD}{r['daytrade_score']}{C.RESET}   {C.GREY}RSI{C.RESET} {r['rsi']:.1f}   "
+                  f"{C.GREY}ADX{C.RESET} {r['adx']:.1f}"))
+        print(_kv("BTC relative", f"{C.GREY}7d{C.RESET} {colorize_pct(r.get('vs_btc_7d_pct', 0.0), width=0)}   "
+                  f"{C.GREY}30d{C.RESET} {colorize_pct(r.get('vs_btc_30d_pct', 0.0), width=0)}   "
+                  f"{C.GREY}7d ret{C.RESET} {colorize_pct(r.get('ret7_pct', 0.0), width=0)}"))
+        print(_kv("Active signals", _signal_value(r['daytrade_signals'])))
+        print(_kv("Predicted move", colorize_pct(r['daytrade_predicted_move_pct'], width=0)))
+        print(_kv("Fees", f"{r['daytrade_fees_eur']:.2f} EUR   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['daytrade_breakeven_pct'], width=0)}"))
+        print(_roi_row(r['daytrade_expected_roi_pct'], r['daytrade_predicted_net_eur'],
+                       suffix=f" {C.DIM}on €{r['daytrade_notional']:.0f}{C.RESET}"))
+        print(_kv("Take-profit", f"{C.GREEN}{r['daytrade_take_profit_price']:.6f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['daytrade_stop_loss_price']:.6f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Reward : risk", _rr_value(r['daytrade_risk_reward'])))
+        print(_kv("Full backtest", _backtest_value(r['crypto_dt_full_trades'], r['crypto_dt_full_win_rate'], r['crypto_dt_full_avg'])))
+        print(_kv("Test split", _backtest_value(r['crypto_dt_test_trades'], r['crypto_dt_test_win_rate'], r['crypto_dt_test_avg'])))
 
 def print_crypto_mean_reversion_recommendations(recs):
     print(_section_header(f"CRYPTO MEAN-REVERSION BOUNCES — RSI2<{CRYPTO_MR_RSI2_MAX:g}, green close, above SMA50"))
-    print(f"\n  Separate oversold-bounce track. Position size starts at €{CRYPTO_NOTIONAL_EUR:.0f} "
-          f"and scales down when daily ATR% is above {CRYPTO_ATR_TARGET_PCT:.1f}%.")
+    print()
+    print(_note(f"Separate oversold-bounce track. Position size starts at €{CRYPTO_NOTIONAL_EUR:.0f} "
+                f"and scales down when daily ATR% is above {CRYPTO_ATR_TARGET_PCT:.1f}%."))
     if not recs:
-        print("\n  No crypto coin currently meets the mean-reversion bounce filter.")
+        print(_empty_note("No crypto coin currently meets the mean-reversion bounce filter."))
         return
     for i, r in enumerate(recs, 1):
         units = r["crypto_units"]
         drift = _drift_note(r.get("close_at_scan"), r["price"])
-        print()
-        print(f"  #{i} {r['name']} ({r['ticker']})")
+        _card_header(i, r, stars=True)
         _print_market_line(r)
-        print(f"     LIVE entry price:    {r['price']:>14.6f} {r['currency']}  {drift}")
-        print(f"     Position sizing:     BUY {units:.8f} units = ~€{r['notional']:.2f}")
-        print(f"     Hold:                {int(r['hold_days'])} day(s)")
-        print(f"     Bounce setup:        RSI2<{CRYPTO_MR_RSI2_MAX:g}, green close, close>SMA50")
-        print(f"     RSI: {r['rsi']:.1f}     ATR: {r['atr_pct']:.2f}%     7d return: {r['ret7_pct']:+.2f}%")
-        print(f"     BTC relative:        7d {r.get('vs_btc_7d_pct', 0.0):+.2f}%     30d {r.get('vs_btc_30d_pct', 0.0):+.2f}%")
-        print(f"     Predicted move:      {r['predicted_move_pct']:>+7.2f}%")
-        print(f"     Fees:                {r['total_fees']:>7.2f} EUR  (break-even {r['breakeven_pct']:+.2f}%)")
-        print(f"     >> Expected net ROI: {r['expected_roi_pct']:>+7.2f}%   "
-              f"-> {r['predicted_net_eur']:>+7.2f} EUR")
-        print(f"     Take-profit price:   {r['take_profit_price']:>14.6f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['stop_loss_price']:>14.6f} {r['currency']}")
-        print(f"     Reward:risk ratio:   {r['risk_reward']:.2f} : 1")
-        print(f"     MR backtest:         {int(r['mr_full_trades'])} trades, {r['mr_full_win_rate']:.1f}% win rate, avg {r['mr_full_avg']:+.2f}%")
-        print(f"     MR test split:       {int(r['mr_test_trades'])} trades, {r['mr_test_win_rate']:.1f}% win rate, avg {r['mr_test_avg']:+.2f}%")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'], 6)}  {drift}"))
+        print(_kv("Position sizing", f"{C.GREEN}BUY{C.RESET} {units:.8f} units   "
+                  f"{C.GREY}≈{C.RESET} €{r['notional']:.2f}   {C.GREY}hold{C.RESET} {int(r['hold_days'])}d"))
+        print(_kv("Bounce setup", f"{C.DIM}RSI2<{CRYPTO_MR_RSI2_MAX:g}, green close, close>SMA50{C.RESET}"))
+        print(_kv("RSI / ATR / 7d ret", f"{C.GREY}RSI{C.RESET} {r['rsi']:.1f}   "
+                  f"{C.GREY}ATR{C.RESET} {r['atr_pct']:.2f}%   "
+                  f"{C.GREY}7d ret{C.RESET} {colorize_pct(r['ret7_pct'], width=0)}"))
+        print(_kv("BTC relative", f"{C.GREY}7d{C.RESET} {colorize_pct(r.get('vs_btc_7d_pct', 0.0), width=0)}   "
+                  f"{C.GREY}30d{C.RESET} {colorize_pct(r.get('vs_btc_30d_pct', 0.0), width=0)}"))
+        print(_kv("Predicted move", colorize_pct(r['predicted_move_pct'], width=0)))
+        print(_kv("Fees", f"{r['total_fees']:.2f} EUR   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['breakeven_pct'], width=0)}"))
+        print(_roi_row(r['expected_roi_pct'], r['predicted_net_eur']))
+        print(_kv("Take-profit", f"{C.GREEN}{r['take_profit_price']:.6f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['stop_loss_price']:.6f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Reward : risk", _rr_value(r['risk_reward'])))
+        print(_kv("MR backtest", _backtest_value(r['mr_full_trades'], r['mr_full_win_rate'], r['mr_full_avg'])))
+        print(_kv("MR test split", _backtest_value(r['mr_test_trades'], r['mr_test_win_rate'], r['mr_test_avg'])))
 
 def print_crypto_intraday_recommendations(recs):
     print(_section_header(
         f"CRYPTO INTRADAY RECOMMENDATIONS — {CRYPTO_INTRADAY_HOLDS} hour holds, "
         f"base €{CRYPTO_NOTIONAL_EUR:.0f} ATR-adjusted sizing, hourly bars"
     ))
-    print(f"\n  Predicted move must clear {CRYPTO_INTRADAY_MIN_PREDICTED_PCT:.1f}% "
-          f"after Revolut fees ({2*CRYPTO_FEE_PCT*100:.2f}% round-trip).  Hourly bars from "
-          f"yfinance go back ~{CRYPTO_INTRADAY_LOOKBACK} for backtesting.")
+    print()
+    print(_note(f"Predicted move must clear {CRYPTO_INTRADAY_MIN_PREDICTED_PCT:.1f}% "
+                f"after Revolut fees ({2*CRYPTO_FEE_PCT*100:.2f}% round-trip).  Hourly bars from "
+                f"yfinance go back ~{CRYPTO_INTRADAY_LOOKBACK} for backtesting."))
     if not recs:
-        print("\n  No crypto coin currently meets the intraday filter on hourly bars.")
-        print("  This is the strictest of the three crypto tracks — intraday moves rarely")
-        print("  exceed the 3% Revolut round-trip fee after spread and fees.  Try larger size or")
-        print("  wait for higher-volatility windows.")
+        print(_empty_note("No crypto coin currently meets the intraday filter on hourly bars."))
+        print(_note("This is the strictest of the three crypto tracks — intraday moves rarely"))
+        print(_note("exceed the 3% Revolut round-trip fee. Try larger size or higher-volatility windows."))
         return
     for i, r in enumerate(recs, 1):
         units = r["intraday_units"]
         drift = _drift_note(r.get("close_at_scan"), r["price"])
-        aligned_tag = ""
-        if r.get("mtf_aligned"):
-            aligned_tag = f" {C.BG_GREEN}{C.BOLD} ALIGNED {C.RESET}"
-        print()
-        print(f"  #{i} {C.BOLD}{r['name']}{C.RESET} ({r['ticker']}){aligned_tag}")
+        aligned_tag = f"  {C.BG_GREEN}{C.BOLD} ALIGNED {C.RESET}" if r.get("mtf_aligned") else ""
+        _card_header(i, r, extra=aligned_tag, stars=True)
         _print_market_line(r)
-        print(f"     Suggested hold:      {int(r['hold_hours'])} hour(s)")
-        print(f"     LIVE entry price:    {C.BOLD}{r['price']:>14.6f} {r['currency']}{C.RESET}  {drift}")
-        print(f"     Position sizing:     BUY {units:.8f} units = ~€{r['intraday_notional']:.2f}")
-        print(f"     Daily score:         {r['score']}  Daytrade score: {r['daytrade_score']}  "
-              f"Intraday score: {r['intraday_score']}"
-              + (f"  {C.GREEN}(all 3 ≥ {MTF_ALIGNMENT_THRESHOLD}){C.RESET}" if r.get("mtf_aligned") else ""))
-        print(f"     Hourly RSI: {r['rsi']:.1f}     Hourly ADX: {r['adx']:.1f}     "
-              f"Daily regime: {r['regime']:+d}")
-        print(f"     BTC relative:        7d {r.get('vs_btc_7d_pct', 0.0):+.2f}%     "
-              f"30d {r.get('vs_btc_30d_pct', 0.0):+.2f}%     7d return {r.get('ret7_pct', 0.0):+.2f}%")
-        sig_short = (r['intraday_signals'][:110] + '...') if len(r['intraday_signals']) > 110 else r['intraday_signals']
-        print(f"     Hourly signals:      {sig_short}")
-        print(f"     Hourly vol ({r['hold_hours']}h): {r['intraday_vol_pct']:>+6.2f}%")
-        print(f"     Predicted move:      {r['intraday_predicted_move_pct']:>+7.2f}%")
-        print(f"     Fees:                {r['intraday_fees_eur']:>7.2f} EUR  (break-even {r['intraday_breakeven_pct']:+.2f}%)")
-        print(f"     >> Expected net ROI: {r['intraday_expected_roi_pct']:>+7.2f}%   "
-              f"-> {r['intraday_predicted_net_eur']:>+7.2f} EUR on €{r['intraday_notional']:.0f}")
-        print(f"     Take-profit price:   {r['intraday_take_profit_price']:>14.6f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['intraday_stop_loss_price']:>14.6f} {r['currency']}")
-        print(f"     Reward:risk ratio:   {r['intraday_risk_reward']:.2f} : 1")
-        print(f"     Hourly backtest:     {int(r['intraday_bt_trades'])} trades, {r['intraday_bt_win_rate']:.1f}% win rate, avg {r['intraday_bt_avg']:+.2f}%")
-        print(f"     Hourly test split:   {int(r['intraday_test_trades'])} trades, {r['intraday_test_win_rate']:.1f}% win rate, avg {r['intraday_test_avg']:+.2f}%")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'], 6)}  {drift}"
+                  f"   {C.GREY}hold{C.RESET} {int(r['hold_hours'])}h"))
+        print(_kv("Position sizing", f"{C.GREEN}BUY{C.RESET} {units:.8f} units   "
+                  f"{C.GREY}≈{C.RESET} €{r['intraday_notional']:.2f}"))
+        aligned_note = f"  {C.GREEN}(all 3 ≥ {MTF_ALIGNMENT_THRESHOLD}){C.RESET}" if r.get("mtf_aligned") else ""
+        print(_kv("Scores (D/DT/ID)", f"{C.BOLD}{r['score']}{C.RESET} {C.GREY}/{C.RESET} "
+                  f"{C.BOLD}{r['daytrade_score']}{C.RESET} {C.GREY}/{C.RESET} "
+                  f"{C.BOLD}{r['intraday_score']}{C.RESET}{aligned_note}"))
+        print(_kv("RSI / ADX / regime", f"{C.GREY}RSI{C.RESET} {r['rsi']:.1f}   "
+                  f"{C.GREY}ADX{C.RESET} {r['adx']:.1f}   {C.GREY}Regime{C.RESET} {r['regime']:+d}"))
+        print(_kv("BTC relative", f"{C.GREY}7d{C.RESET} {colorize_pct(r.get('vs_btc_7d_pct', 0.0), width=0)}   "
+                  f"{C.GREY}30d{C.RESET} {colorize_pct(r.get('vs_btc_30d_pct', 0.0), width=0)}   "
+                  f"{C.GREY}7d ret{C.RESET} {colorize_pct(r.get('ret7_pct', 0.0), width=0)}"))
+        print(_kv("Hourly signals", _signal_value(r['intraday_signals'])))
+        print(_kv(f"Hourly vol ({r['hold_hours']}h)", colorize_pct(r['intraday_vol_pct'], width=0)))
+        print(_kv("Predicted move", colorize_pct(r['intraday_predicted_move_pct'], width=0)))
+        print(_kv("Fees", f"{r['intraday_fees_eur']:.2f} EUR   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['intraday_breakeven_pct'], width=0)}"))
+        print(_roi_row(r['intraday_expected_roi_pct'], r['intraday_predicted_net_eur'],
+                       suffix=f" {C.DIM}on €{r['intraday_notional']:.0f}{C.RESET}"))
+        print(_kv("Take-profit", f"{C.GREEN}{r['intraday_take_profit_price']:.6f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['intraday_stop_loss_price']:.6f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Reward : risk", _rr_value(r['intraday_risk_reward'])))
+        print(_kv("Hourly backtest", _backtest_value(r['intraday_bt_trades'], r['intraday_bt_win_rate'], r['intraday_bt_avg'])))
+        print(_kv("Hourly test split", _backtest_value(r['intraday_test_trades'], r['intraday_test_win_rate'], r['intraday_test_avg'])))
 
 def print_week_recommendations(recs):
     print(_section_header(f"MIXED WEEK RECOMMENDATIONS — {WEEK_HOLD_DAYS}-day hold, all OOS-robust asset classes (excl. crypto)"))
     if not recs:
-        print("\n  No instrument passed the 5-day-hold filter today.")
+        print(_empty_note("No instrument passed the 5-day-hold filter today."))
         return
     for i, r in enumerate(recs, 1):
         drift = _drift_note(r.get("close_at_scan"), r["price"])
-        print()
-        print(f"  #{i} {r['name']} ({r['ticker']} / {r['asset_class']})")
+        _card_header(i, r, stars=True)
         _print_market_line(r)
-        print(f"     Hold:                {int(r['hold_days'])} days")
-        print(f"     LIVE entry price:    {r['price']:>10.4f} {r['currency']}  {drift}")
-        print(f"     Signal score:        {r['score']}     RSI: {r['rsi']:.1f}     "
-              f"ADX: {r['adx']:.1f}     Regime: {r['regime']:+d}")
-        sig_short = (r['signals'][:110] + '...') if len(r['signals']) > 110 else r['signals']
-        print(f"     Active signals:      {sig_short}")
-        print(f"     Predicted move:      {r['predicted_move_pct']:>+7.2f}%   "
-              f"({int(r['hold_days'])}-day vol={r['vol_2w_pct']:.1f}%)")
-        print(f"     Fees:                {r['total_fees']:>7.2f} EUR  (break-even {r['breakeven_pct']:+.2f}%)")
-        print(f"     >> Expected net ROI: {r['expected_roi_pct']:>+7.2f}%  -> {r['predicted_net_eur']:>+7.2f} EUR per piece")
-        print(f"     Take-profit price:   {r['take_profit_price']:>10.4f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['stop_loss_price']:>10.4f} {r['currency']}")
-        print(f"     Reward:risk ratio:   {r['risk_reward']:.2f} : 1")
-        print(f"     5-day full backtest: {int(r['week_bt_trades'])} trades, {r['week_bt_win_rate']:.1f}% win rate, avg {r['week_bt_avg']:+.2f}%")
-        print(f"     5-day test split:    {int(r['week_test_trades'])} trades, {r['week_test_win_rate']:.1f}% win rate, avg {r['week_test_avg']:+.2f}%")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'])}  {drift}"
+                  f"   {C.GREY}hold{C.RESET} {int(r['hold_days'])}d"))
+        print(_kv("Score / RSI / ADX", f"{C.BOLD}{r['score']}{C.RESET}   "
+                  f"{C.GREY}RSI{C.RESET} {r['rsi']:.1f}   {C.GREY}ADX{C.RESET} {r['adx']:.1f}   "
+                  f"{C.GREY}Regime{C.RESET} {r['regime']:+d}"))
+        print(_kv("Active signals", _signal_value(r['signals'])))
+        print(_kv("Predicted move", f"{colorize_pct(r['predicted_move_pct'], width=0)}   "
+                  f"{C.DIM}({int(r['hold_days'])}-day vol {r['vol_2w_pct']:.1f}%){C.RESET}"))
+        print(_kv("Fees", f"{r['total_fees']:.2f} EUR   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['breakeven_pct'], width=0)}"))
+        print(_roi_row(r['expected_roi_pct'], r['predicted_net_eur'], suffix=f" {C.DIM}per piece{C.RESET}"))
+        print(_kv("Take-profit", f"{C.GREEN}{r['take_profit_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['stop_loss_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Reward : risk", _rr_value(r['risk_reward'])))
+        print(_kv("5-day backtest", _backtest_value(r['week_bt_trades'], r['week_bt_win_rate'], r['week_bt_avg'])))
+        print(_kv("5-day test split", _backtest_value(r['week_test_trades'], r['week_test_win_rate'], r['week_test_avg'])))
 
 def print_stock_week_recommendations(recs):
     print(_section_header(f"STOCK WEEK RECOMMENDATIONS — cash stocks, {STOCK_WEEK_HOLD_DAYS}-day hold, ~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position"))
     if not recs:
-        print("\n  No cash stock passed the 5-day filter today.")
+        print(_empty_note("No cash stock passed the 5-day filter today."))
         return
     for i, r in enumerate(recs, 1):
         units = int(r["stock_week_units"])
         drift = _drift_note(r.get("close_at_scan"), r["price"])
-        print()
-        print(f"  #{i} {r['name']} ({r['ticker']})")
+        _card_header(i, r, stars=True)
         _print_market_line(r)
-        print(f"     LIVE entry price:    {r['price']:>10.4f} {r['currency']}  {drift}")
-        print(f"     Position sizing:     BUY {units} shares = ~{r['stock_week_notional']:.0f} {r['currency']}")
-        print(f"     Hold:                {int(r['hold_days'])} days")
-        print(f"     Signal score:        {r['score']}     RSI: {r['rsi']:.1f}     "
-              f"ADX: {r['adx']:.1f}     Regime: {r['regime']:+d}")
-        sig_short = (r['signals'][:110] + '...') if len(r['signals']) > 110 else r['signals']
-        print(f"     Active signals:      {sig_short}")
-        print(f"     Predicted move:      {r['predicted_move_pct']:>+7.2f}%")
-        print(f"     Fees:                {r['total_fees']:>7.2f} EUR  (break-even {r['breakeven_pct']:+.2f}%)")
-        print(f"     >> Expected net ROI: {r['expected_roi_pct']:>+7.2f}%   "
-              f"-> {r['predicted_net_eur']:>+7.2f} EUR on the position")
-        print(f"     Take-profit price:   {r['take_profit_price']:>10.4f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['stop_loss_price']:>10.4f} {r['currency']}")
-        print(f"     Reward:risk ratio:   {r['risk_reward']:.2f} : 1")
-        print(f"     5-day backtest:      {int(r['sw_full_trades'])} trades, {r['sw_full_win_rate']:.1f}% win rate, avg {r['sw_full_avg']:+.2f}%")
-        print(f"     Train split:         {int(r['sw_train_trades'])} trades, avg {r['sw_train_avg']:+.2f}%")
-        print(f"     Test split:          {int(r['sw_test_trades'])} trades, {r['sw_test_win_rate']:.1f}% win rate, avg {r['sw_test_avg']:+.2f}%")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'])}  {drift}"
+                  f"   {C.GREY}hold{C.RESET} {int(r['hold_days'])}d"))
+        print(_kv("Position sizing", f"{C.GREEN}BUY{C.RESET} {units} shares   "
+                  f"{C.GREY}≈{C.RESET} {r['stock_week_notional']:.0f} {r['currency']}"))
+        print(_kv("Score / RSI / ADX", f"{C.BOLD}{r['score']}{C.RESET}   "
+                  f"{C.GREY}RSI{C.RESET} {r['rsi']:.1f}   {C.GREY}ADX{C.RESET} {r['adx']:.1f}   "
+                  f"{C.GREY}Regime{C.RESET} {r['regime']:+d}"))
+        print(_kv("Active signals", _signal_value(r['signals'])))
+        print(_kv("Predicted move", colorize_pct(r['predicted_move_pct'], width=0)))
+        print(_kv("Fees", f"{r['total_fees']:.2f} EUR   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['breakeven_pct'], width=0)}"))
+        print(_roi_row(r['expected_roi_pct'], r['predicted_net_eur'], suffix=f" {C.DIM}on the position{C.RESET}"))
+        print(_kv("Take-profit", f"{C.GREEN}{r['take_profit_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['stop_loss_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Reward : risk", _rr_value(r['risk_reward'])))
+        print(_kv("5-day backtest", _backtest_value(r['sw_full_trades'], r['sw_full_win_rate'], r['sw_full_avg'])))
+        print(_kv("Train split", f"{C.BOLD}{int(r['sw_train_trades'])}{C.RESET} trades   "
+                  f"avg {colorize_pct(r['sw_train_avg'], width=0)}"))
+        print(_kv("Test split", _backtest_value(r['sw_test_trades'], r['sw_test_win_rate'], r['sw_test_avg'])))
 
 def print_stock_intraday_recommendations(recs):
     print(_section_header(
         f"STOCK INTRADAY RECOMMENDATIONS — cash stocks, hourly bars, "
         f"~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position"
     ))
-    print(f"\n  Holds: {STOCK_INTRADAY_HOLDS} hours.  Stock hourly bars are sparse (~6.5/day for US),")
-    print(f"  so filters use a looser min-trade count.  Predicted move floor: {STOCK_INTRADAY_MIN_PREDICTED_PCT:.2f}%.")
+    print()
+    print(_note(f"Holds: {STOCK_INTRADAY_HOLDS} hours.  Stock hourly bars are sparse (~6.5/day for US), "
+                f"so filters use a looser min-trade count.  Move floor: {STOCK_INTRADAY_MIN_PREDICTED_PCT:.2f}%."))
     if not recs:
-        print("\n  No cash stock currently meets the intraday filter on hourly bars.")
+        print(_empty_note("No cash stock currently meets the intraday filter on hourly bars."))
         return
     for i, r in enumerate(recs, 1):
         units = int(r["intraday_units"])
         drift = _drift_note(r.get("close_at_scan"), r["price"])
-        print()
-        print(f"  #{i} {r['name']} ({r['ticker']})")
+        _card_header(i, r, stars=True)
         _print_market_line(r)
-        print(f"     Suggested hold:      {int(r['hold_hours'])} hour(s)")
-        print(f"     LIVE entry price:    {r['price']:>10.4f} {r['currency']}  {drift}")
-        print(f"     Position sizing:     BUY {units} shares = ~{r['intraday_notional']:.0f} {r['currency']}")
-        print(f"     Daily score:         {r['score']}  Daytrade score: {r['daytrade_score']}  "
-              f"Intraday score: {r['intraday_score']}")
-        print(f"     Hourly RSI: {r['rsi']:.1f}     Hourly ADX: {r['adx']:.1f}     "
-              f"Daily regime: {r['regime']:+d}")
-        sig_short = (r['intraday_signals'][:110] + '...') if len(r['intraday_signals']) > 110 else r['intraday_signals']
-        print(f"     Hourly signals:      {sig_short}")
-        print(f"     Hourly vol ({r['hold_hours']}h): {r['intraday_vol_pct']:>+6.2f}%")
-        print(f"     Predicted move:      {r['intraday_predicted_move_pct']:>+7.2f}%")
-        print(f"     Fees:                {r['intraday_fees_eur']:>7.2f} EUR  (break-even {r['intraday_breakeven_pct']:+.2f}%)")
-        print(f"     >> Expected net ROI: {r['intraday_expected_roi_pct']:>+7.2f}%   "
-              f"-> {r['intraday_predicted_net_eur']:>+7.2f} EUR")
-        print(f"     Take-profit price:   {r['intraday_take_profit_price']:>10.4f} {r['currency']}")
-        print(f"     Stop-loss price:     {r['intraday_stop_loss_price']:>10.4f} {r['currency']}")
-        print(f"     Reward:risk ratio:   {r['intraday_risk_reward']:.2f} : 1")
-        print(f"     Hourly backtest:     {int(r['intraday_bt_trades'])} trades, {r['intraday_bt_win_rate']:.1f}% win rate, avg {r['intraday_bt_avg']:+.2f}%")
-        print(f"     Hourly test split:   {int(r['intraday_test_trades'])} trades, {r['intraday_test_win_rate']:.1f}% win rate, avg {r['intraday_test_avg']:+.2f}%")
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'])}  {drift}"
+                  f"   {C.GREY}hold{C.RESET} {int(r['hold_hours'])}h"))
+        print(_kv("Position sizing", f"{C.GREEN}BUY{C.RESET} {units} shares   "
+                  f"{C.GREY}≈{C.RESET} {r['intraday_notional']:.0f} {r['currency']}"))
+        print(_kv("Scores (D/DT/ID)", f"{C.BOLD}{r['score']}{C.RESET} {C.GREY}/{C.RESET} "
+                  f"{C.BOLD}{r['daytrade_score']}{C.RESET} {C.GREY}/{C.RESET} "
+                  f"{C.BOLD}{r['intraday_score']}{C.RESET}"))
+        print(_kv("RSI / ADX / regime", f"{C.GREY}RSI{C.RESET} {r['rsi']:.1f}   "
+                  f"{C.GREY}ADX{C.RESET} {r['adx']:.1f}   {C.GREY}Regime{C.RESET} {r['regime']:+d}"))
+        print(_kv("Hourly signals", _signal_value(r['intraday_signals'])))
+        print(_kv(f"Hourly vol ({r['hold_hours']}h)", colorize_pct(r['intraday_vol_pct'], width=0)))
+        print(_kv("Predicted move", colorize_pct(r['intraday_predicted_move_pct'], width=0)))
+        print(_kv("Fees", f"{r['intraday_fees_eur']:.2f} EUR   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['intraday_breakeven_pct'], width=0)}"))
+        print(_roi_row(r['intraday_expected_roi_pct'], r['intraday_predicted_net_eur']))
+        print(_kv("Take-profit", f"{C.GREEN}{r['intraday_take_profit_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['intraday_stop_loss_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Reward : risk", _rr_value(r['intraday_risk_reward'])))
+        print(_kv("Hourly backtest", _backtest_value(r['intraday_bt_trades'], r['intraday_bt_win_rate'], r['intraday_bt_avg'])))
+        print(_kv("Hourly test split", _backtest_value(r['intraday_test_trades'], r['intraday_test_win_rate'], r['intraday_test_avg'])))
 
 # =================== LIVE-MODE STATE ===================
 _LIVE_PRIOR = {}  # key=(track, ticker) → previous price / SL / TP / status

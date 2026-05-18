@@ -32,6 +32,10 @@ stock_recommendations.csv
 stock_week_recommendations.csv
 sweep_results.csv
 week_recommendations.csv
+paper_trades_all.csv
+paper_trades_intraday.csv
+paper_trades_crypto.csv
+live_state.json
 runs/
 
 # Local diagnostics
