@@ -397,6 +397,18 @@ N_WEEK_RECOMMENDATIONS = 5
 WEEK_HOLD_DAYS         = 5
 WEEK_MIN_SCORE         = 4   # calibrated to the cleaned compute_score range
 
+# --- Position trades (~40 trading-day hold, all robust classes, excl. crypto) ---
+# Forward-test analysis showed trend signals and cross-sectional momentum carry
+# 3-8x the predictive lift at a ~40-day horizon than at 10 days; this track
+# holds longer and is momentum-ranked. OOS uses looser minimum-trade gates
+# because 40-day holds yield far fewer non-overlapping backtest trades.
+N_POSITION_RECOMMENDATIONS = 5
+POSITION_HOLD_DAYS         = 40
+POSITION_MIN_SCORE         = 4
+MIN_POSITION_TRADES        = 6
+MIN_POSITION_TEST_TRADES   = 3
+POSITION_RECOMMENDATIONS_CSV = "position_recommendations.csv"
+
 # --- Stock WEEK (cash stocks, ~€1000 sizing, 5-day hold) ---
 N_STOCK_WEEK_RECOMMENDATIONS = 5
 STOCK_WEEK_HOLD_DAYS         = 5
@@ -2862,6 +2874,85 @@ def build_week_recommendations(scan_rows, enriched, scores_map, oos_results, oos
     recs.sort(key=lambda x: x["rank_score"], reverse=True)
     return recs[:N_WEEK_RECOMMENDATIONS]
 
+# =================== POSITION TRADES (~40-day hold) ===================
+def build_position_recommendations(scan_rows, enriched, scores_map, oos_results, oos_lookup):
+    """Longer-horizon (~40 trading-day) position trades in cash stocks/ETFs.
+
+    Forward tests showed trend signals and cross-sectional momentum have far
+    stronger predictive lift at this horizon than at the 1-2 week tracks, so
+    this track holds longer and is momentum-ranked (via recalibrate_recs).
+
+    Restricted to cash stocks and ETFs on purpose: a ~40-day hold on a
+    leveraged CFD accrues large overnight financing and ruinous margin risk,
+    so CFDs and crypto are excluded from the position track.
+    """
+    robust = {r["asset_class"] for r in oos_results if r.get("verdict") == "ROBUST"}
+    weak   = {r["asset_class"] for r in oos_results if r.get("verdict") == "WEAK"}
+    accept = robust | (weak if ALLOW_WEAK_CLASSES else set())
+
+    recs = []
+    for r in scan_rows:
+        if r["asset_class"] not in ("stock", "etf"): continue
+        if r["asset_class"] not in accept: continue
+        if r["score"] < POSITION_MIN_SCORE: continue
+        if r["price"] <= 0:                continue
+
+        # Re-scale move/vol from the 2-week baseline to the ~40-day horizon.
+        scaled_vol = r["vol_2w_pct"] * np.sqrt(POSITION_HOLD_DAYS / HOLD_TRADING_DAYS)
+        scaled_pred = r["confidence"] * scaled_vol * 0.7
+
+        df, scores = _enriched_df_and_scores(enriched, scores_map, r)
+        if df is None or scores is None: continue
+
+        oos_ticker = run_per_ticker_oos(df, scores, r["asset_class"], r["currency"],
+                                        SCORE_THRESHOLD, POSITION_HOLD_DAYS)
+        if oos_ticker is None: continue
+        full, train, test = oos_ticker
+        if not _oos_gate_ok(full, train, test, min_full=MIN_POSITION_TRADES,
+                            min_test=MIN_POSITION_TEST_TRADES, require_train=False):
+            continue
+
+        units = UNITS_PER_TRADE
+        notional = r["price"] * units
+        of, cf = fees_open_close(r["asset_class"], notional)
+        cal_days = max(1, int(round(POSITION_HOLD_DAYS * 1.4)))
+        ov = overnight_cost(r["asset_class"], notional, r["currency"], cal_days)
+        fees = of + cf + ov
+        gross = notional * scaled_pred / 100.0
+        predicted_net = gross - fees
+        if predicted_net <= 0: continue
+
+        sl, tp, rr = trade_levels(r["price"], scaled_vol, scaled_pred, STOP_LOSS_VOL_FRAC)
+        if pd.isna(rr) or rr < MIN_RR_RATIO: continue
+
+        recs.append({
+            **r,
+            "hold_days": POSITION_HOLD_DAYS,
+            "vol_2w_pct": scaled_vol,
+            "predicted_move_pct": scaled_pred,
+            "notional": notional,
+            "open_fee": of, "close_fee": cf, "overnight": ov,
+            "total_fees": fees,
+            "breakeven_pct": fees / notional * 100 if notional > 0 else np.nan,
+            "predicted_net_eur": predicted_net,
+            "bull_case_net_eur": notional * scaled_vol / 100 - fees,
+            "bear_case_net_eur": -notional * scaled_vol / 100 - fees,
+            "expected_roi_pct": predicted_net / notional * 100,
+            "stop_loss_price": sl,
+            "take_profit_price": tp,
+            "risk_reward": rr,
+            "position_bt_trades": full["n"], "position_bt_win_rate": full["win_rate"],
+            "position_bt_avg": full["avg"],
+            "position_test_trades": test["n"], "position_test_win_rate": test["win_rate"],
+            "position_test_avg": test["avg"],
+        })
+    recalibrate_recs(recs, move_key="predicted_move_pct", net_key="predicted_net_eur",
+                     roi_key="expected_roi_pct", notional_key="notional",
+                     full_avg_key="position_bt_avg", test_avg_key="position_test_avg",
+                     test_winrate_key="position_test_win_rate")
+    recs.sort(key=lambda x: x["rank_score"], reverse=True)
+    return recs[:N_POSITION_RECOMMENDATIONS]
+
 # =================== STOCK WEEK (cash stocks, 5-day hold, sized) ===================
 def build_stock_week_recommendations(scan_rows, enriched, scores_map, robust_classes, weak_classes):
     """5-day cash-stock recs sized at STOCK_DAYTRADE_NOTIONAL_EUR (~€1000),
@@ -3549,6 +3640,33 @@ def print_week_recommendations(recs):
         print(_kv("5-day backtest", _backtest_value(r['week_bt_trades'], r['week_bt_win_rate'], r['week_bt_avg'])))
         print(_kv("5-day test split", _backtest_value(r['week_test_trades'], r['week_test_win_rate'], r['week_test_avg'])))
 
+def print_position_recommendations(recs):
+    print(_section_header(f"POSITION-TRADE RECOMMENDATIONS — ~{POSITION_HOLD_DAYS}-day hold, "
+                          f"trend + momentum, cash stocks & ETFs"))
+    if not recs:
+        print(_empty_note("No instrument passed the position-trade filter today."))
+        return
+    for i, r in enumerate(recs, 1):
+        drift = _drift_note(r.get("close_at_scan"), r["price"])
+        _card_header(i, r, stars=True)
+        _print_market_line(r)
+        print(_kv("Live entry", f"{_price(r['price'], r['currency'])}  {drift}"
+                  f"   {C.GREY}hold{C.RESET} ~{int(r['hold_days'])}d"))
+        print(_kv("Score / RSI / ADX", f"{C.BOLD}{r['score']}{C.RESET}   "
+                  f"{C.GREY}RSI{C.RESET} {r['rsi']:.1f}   {C.GREY}ADX{C.RESET} {r['adx']:.1f}   "
+                  f"{C.GREY}Regime{C.RESET} {r['regime']:+d}"))
+        print(_kv("Active signals", _signal_value(r['signals'])))
+        print(_kv("Predicted move", f"{colorize_pct(r['predicted_move_pct'], width=0)}   "
+                  f"{C.DIM}({int(r['hold_days'])}-day vol {r['vol_2w_pct']:.1f}%){C.RESET}"))
+        print(_kv("Fees", f"{r['total_fees']:.2f} EUR   "
+                  f"{C.GREY}break-even{C.RESET} {colorize_pct(r['breakeven_pct'], width=0)}"))
+        print(_roi_row(r['expected_roi_pct'], r['predicted_net_eur'], suffix=f" {C.DIM}per piece{C.RESET}"))
+        print(_kv("Take-profit", f"{C.GREEN}{r['take_profit_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Stop-loss", f"{C.RED}{r['stop_loss_price']:.4f}{C.RESET} {C.GREY}{r['currency']}{C.RESET}"))
+        print(_kv("Reward : risk", _rr_value(r['risk_reward'])))
+        print(_kv("40-day backtest", _backtest_value(r['position_bt_trades'], r['position_bt_win_rate'], r['position_bt_avg'])))
+        print(_kv("40-day test split", _backtest_value(r['position_test_trades'], r['position_test_win_rate'], r['position_test_avg'])))
+
 def print_stock_week_recommendations(recs):
     print(_section_header(f"STOCK WEEK RECOMMENDATIONS — cash stocks, {STOCK_WEEK_HOLD_DAYS}-day hold, ~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position"))
     if not recs:
@@ -3944,6 +4062,7 @@ def run_scan(iteration=0):
     stock_recs      = build_stock_recommendations(scan_rows, enriched, scores_map, robust_set, weak_set)
     crypto_weekly   = build_crypto_weekly_recommendations(scan_rows, enriched, scores_map, robust_set, weak_set)
     week_recs       = build_week_recommendations(scan_rows, enriched, scores_map, oos_results, oos_lookup)
+    position_recs   = build_position_recommendations(scan_rows, enriched, scores_map, oos_results, oos_lookup)
     stock_week_recs = build_stock_week_recommendations(scan_rows, enriched, scores_map, robust_set, weak_set)
     daytrade_recs   = build_daytrade_recommendations(scan_rows, enriched, day_scores_map)
     stock_dt_recs   = build_stock_daytrade_recommendations(scan_rows, enriched, day_scores_map)
@@ -3985,6 +4104,7 @@ def run_scan(iteration=0):
         refresh_swing_prices(stock_recs, STOP_LOSS_VOL_FRAC)
         refresh_swing_prices(crypto_weekly, STOP_LOSS_VOL_FRAC, crypto_notional=CRYPTO_NOTIONAL_EUR)
         refresh_swing_prices(week_recs, STOP_LOSS_VOL_FRAC)
+        refresh_swing_prices(position_recs, STOP_LOSS_VOL_FRAC)
         refresh_swing_prices(stock_week_recs, STOP_LOSS_VOL_FRAC,
                              stock_notional=STOCK_DAYTRADE_NOTIONAL_EUR)
         refresh_daytrade_prices(daytrade_recs, DAYTRADE_STOP_LOSS_VOL_FRAC)
@@ -4001,6 +4121,7 @@ def run_scan(iteration=0):
     track_rows = {
         "swing": recs,
         "week": week_recs,
+        "position": position_recs,
         "stock_swing": stock_recs,
         "stock_week": stock_week_recs,
         "crypto_weekly": crypto_weekly,
@@ -4028,6 +4149,7 @@ def run_scan(iteration=0):
     )
     recs = track_rows["swing"]
     week_recs = track_rows["week"]
+    position_recs = track_rows["position"]
     stock_recs = track_rows["stock_swing"]
     stock_week_recs = track_rows["stock_week"]
     crypto_weekly = track_rows["crypto_weekly"]
@@ -4062,6 +4184,7 @@ def run_scan(iteration=0):
     if LIVE_MODE:
         _tag_recs_live("swing",        recs)
         _tag_recs_live("week",         week_recs)
+        _tag_recs_live("position",     position_recs)
         _tag_recs_live("stock",        stock_recs)
         _tag_recs_live("stock_week",   stock_week_recs)
         _tag_recs_live("crypto_week",  crypto_weekly)
@@ -4079,7 +4202,7 @@ def run_scan(iteration=0):
         _save_live_state()
         _flush_instant_alerts()
 
-    for rows in (recs, week_recs, stock_recs, stock_week_recs,
+    for rows in (recs, week_recs, position_recs, stock_recs, stock_week_recs,
                  crypto_weekly, daytrade_recs, stock_dt_recs, crypto_dt_recs,
                  crypto_mr_recs, stock_intraday_recs, crypto_intraday_recs):
         attach_market_fields(rows)
@@ -4089,6 +4212,7 @@ def run_scan(iteration=0):
 
     print_recommendations(recs, robust_set, weak_set)
     print_week_recommendations(week_recs)
+    print_position_recommendations(position_recs)
     print_stock_recommendations(stock_recs)
     print_stock_week_recommendations(stock_week_recs)
     print_crypto_weekly_trade_suggestions(crypto_weekly_trade_suggestions)
@@ -4117,6 +4241,9 @@ def run_scan(iteration=0):
         allow_empty=False))
     _remember_output("week_recommendations", write_dataframe_export(
         pd.DataFrame(week_recs), OUTDIR, "week_recommendations.csv", snapshot_dir=snapshot_dir,
+        allow_empty=False))
+    _remember_output("position_recommendations", write_dataframe_export(
+        pd.DataFrame(position_recs), OUTDIR, POSITION_RECOMMENDATIONS_CSV, snapshot_dir=snapshot_dir,
         allow_empty=False))
     _remember_output("stock_recommendations", write_dataframe_export(
         pd.DataFrame(stock_recs), OUTDIR, "stock_recommendations.csv", snapshot_dir=snapshot_dir,

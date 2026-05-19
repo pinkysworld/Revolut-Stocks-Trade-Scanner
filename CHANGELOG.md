@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-05-19
+
+- Investigated two prediction-improvement ideas with measurement before
+  integration. Earnings surprise (`analyze_earnings.py`, `scanner/fundamentals.py`):
+  no post-earnings drift in this large-cap universe (beat vs miss spread
+  −0.03%) — not integrated as a predictor. Longer horizon: forward tests
+  showed trend signals and a cross-sectional ranker have genuine edge at a
+  ~40-day horizon (logistic ranker AUC 0.61, top-5 lift +3.3%) versus none at
+  10 days.
+- Added a position-trade track (`build_position_recommendations`): ~40-day
+  hold, all OOS-robust classes excluding crypto, momentum-ranked, with looser
+  OOS minimum-trade gates suited to the longer horizon. New
+  `position_recommendations.csv` output.
+
 ## 2026-05-18 (scoring & regime)
 
 - Cleaned up `compute_score` using the per-signal attribution: removed the
