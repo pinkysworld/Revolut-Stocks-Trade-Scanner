@@ -18,7 +18,7 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Compile
         run: |
-          python -m py_compile revolut_scanner_v13.py scanner/runtime.py scanner/reporting.py scanner/quality.py scanner/risk.py scanner/notifications.py
+          python -m py_compile revolut_scanner_v13.py scanner/*.py
       - name: Test
         run: |
           pytest

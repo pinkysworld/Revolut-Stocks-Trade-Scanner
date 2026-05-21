@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so tests can `import scanner` / the entrypoint
+# under a bare `pytest` invocation (e.g. in CI), not only `python -m pytest`.
+pythonpath = ["."]
+testpaths = ["tests"]
