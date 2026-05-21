@@ -497,6 +497,14 @@ SWEEP_CACHE_DIR    = os.path.join(YF_CACHE_DIR, "sweep")
 # --- Walk-forward OOS (replaces single 70/30 split when enabled) ---
 USE_WALK_FORWARD   = True   # use rolling K-fold walk-forward for OOS validation
 WALK_FORWARD_FOLDS = 3      # number of test windows
+# --- Risk-based position sizing (volatility-targeted via the stop distance) ---
+# Each recommendation gets a suggested size so that hitting the stop-loss costs
+# roughly RISK_PER_TRADE in the instrument's currency. Because the stop is set
+# from ATR volatility, this automatically sizes high-volatility names smaller —
+# equal risk per position rather than equal notional. Advisory: shown on the
+# card, it does not change the track's own projection/notional.
+RISK_PER_TRADE = 20.0
+
 PORTFOLIO_LIMITS_ENABLED   = True
 PORTFOLIO_FILTER_RECOMMENDATIONS = False
 PORTFOLIO_MAX_TOTAL_RISK_EUR = 120.0
@@ -1266,6 +1274,40 @@ def margin_required(asset_class, notional):
     the notional is posted as margin; cash instruments post the full notional."""
     lev = cfd_leverage(asset_class)
     return notional / lev if lev > 0 else notional
+
+def _first(rec, *keys):
+    for k in keys:
+        v = rec.get(k)
+        if v is not None and not (isinstance(v, float) and pd.isna(v)):
+            return v
+    return None
+
+def attach_risk_sizing(rows, risk_per_trade=RISK_PER_TRADE):
+    """Annotate each rec with a volatility-targeted size from its stop distance.
+
+    Sizes the position so that hitting the stop-loss loses ~risk_per_trade in
+    the instrument's currency: units = risk_per_trade / (entry - stop). Since
+    the stop is ATR-derived, volatile names get smaller sizes automatically.
+    Cash/CFD equities round to whole units; crypto stays fractional. Advisory —
+    leaves the track's own notional/ROI untouched.
+    """
+    for r in rows:
+        entry = _first(r, "price")
+        stop = _first(r, "stop_loss_price", "daytrade_stop_loss_price",
+                      "intraday_stop_loss_price")
+        if not entry or not stop or entry <= 0 or stop <= 0 or entry <= stop:
+            continue
+        risk_per_unit = entry - stop
+        # Fractional units — Revolut supports fractional shares/CFDs, so the
+        # risk-per-trade target is hit exactly rather than floored to 1 unit.
+        units = risk_per_trade / risk_per_unit
+        lev = cfd_leverage(r["asset_class"])
+        notional = units * entry
+        r["risk_units"] = units
+        r["risk_notional"] = notional
+        r["risk_margin"] = notional / lev if lev > 0 else notional
+        r["risk_max_loss"] = units * risk_per_unit  # == risk_per_trade by construction
+    return rows
 
 # =================== SCORING ===================
 # --- Shared signal helpers (used across swing / daytrade / intraday scorers) ---
@@ -3327,6 +3369,17 @@ def _card_header(i, r, *, extra: str = "", stars: bool = False) -> None:
         col = C.GREEN if wp >= 0.55 else (C.YELLOW if wp >= 0.45 else C.RED)
         print(_kv("Win probability", f"{col}{C.BOLD}{wp*100:.0f}%{C.RESET}"
                   f"   {C.DIM}held-out OOS backtest win rate{C.RESET}"))
+    ru = r.get("risk_units")
+    if ru is not None and not (isinstance(ru, float) and np.isnan(ru)):
+        cur = r.get("currency", "")
+        prec = 8 if r.get("asset_class") == "crypto" else 4
+        units_str = f"{ru:.{prec}f}".rstrip("0").rstrip(".")
+        margin_note = ""
+        if r.get("risk_margin") and r.get("risk_notional") and r["risk_margin"] < r["risk_notional"] - 1:
+            margin_note = f"   {C.GREY}margin{C.RESET} {r['risk_margin']:.0f} {cur}"
+        print(_kv("Risk-based size", f"{C.GREEN}BUY{C.RESET} {units_str} units   "
+                  f"{C.GREY}≈{C.RESET} {r.get('risk_notional', 0):.0f} {cur}{margin_note}   "
+                  f"{C.GREY}max loss ≈{C.RESET} {r.get('risk_max_loss', 0):.0f} {cur} if stopped"))
 
 
 def _signal_value(signals: str) -> str:
@@ -4233,6 +4286,7 @@ def run_scan(iteration=0):
                  crypto_weekly, daytrade_recs, stock_dt_recs, crypto_dt_recs,
                  crypto_mr_recs, stock_intraday_recs, crypto_intraday_recs):
         attach_market_fields(rows)
+        attach_risk_sizing(rows)
 
     crypto_weekly_trade_suggestions = build_crypto_weekly_trade_suggestions(crypto_weekly)
     attach_market_fields(crypto_weekly_trade_suggestions)
@@ -4409,6 +4463,10 @@ def run_scan(iteration=0):
     print(f" Revolut Free crypto fees are configured at {CRYPTO_FEE_PCT*100:.2f}%/side; lower CRYPTO_FEE_PCT only if you have Premium.")
     print(" Crypto trades 24/7 — set Revolut price alerts for SL/TP because there's no overnight gap protection.")
     print(" Stock intraday: hourly bars only exist during exchange hours, so 24h hold ≈ next-day open.")
+    print(f" Suggested position sizes target ~{RISK_PER_TRADE:.0f} of risk per trade if the stop is hit "
+          "(volatility-scaled).")
+    print(f" {C.YELLOW}Survivorship bias:{C.RESET} backtests/OOS use only instruments that exist TODAY — "
+          "delisted names are absent, so historical win rates and averages are optimistically biased.")
     print(" NOT financial advice.")
 
 def main(argv=None):

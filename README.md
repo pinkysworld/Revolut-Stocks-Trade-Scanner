@@ -5,7 +5,8 @@ A local trading scanner for the Revolut Germany instrument universe, centered ar
 ## What It Does
 
 - Scans stocks, ETFs, equity CFDs, index CFDs, commodity CFDs, and crypto.
-- Produces swing, week, daytrade, intraday, and crypto-specific recommendation tracks.
+- Produces swing, week, ~40-day position, daytrade, intraday, and crypto-specific recommendation tracks.
+- Suggests volatility-targeted position sizes (equal risk-to-stop per trade) and logs every recommendation to a performance journal that scores realised TP/SL/time outcomes.
 - Uses cached yfinance downloads plus enriched-indicator and sweep-result caches for faster reruns.
 - Includes backtests, 3-fold walk-forward out-of-sample verdicts, and CSV exports.
 - Adds runtime JSON config, symbol override support, timestamped run snapshots, and a compact HTML trading dashboard.
@@ -18,6 +19,12 @@ A local trading scanner for the Revolut Germany instrument universe, centered ar
   - Daytrade: `5.0%`
   - Intraday: `5.5%`
 - Splits crypto out-of-sample diagnostics into `crypto_major` and `crypto_alt` buckets while still requiring per-ticker OOS confirmation before surfacing weekly crypto picks.
+
+## Known Limitations
+
+- **Survivorship bias.** Backtests, sweeps and OOS verdicts are computed over the instruments in the universe *today*. Names that were delisted or removed are absent from history entirely, so reported win rates and average returns are **optimistically biased**. Fixing this properly needs a point-in-time / delisted-securities dataset, which `yfinance` does not provide. Treat all historical edge figures as upper bounds.
+- **Weak predictive edge.** Forward tests show the per-name directional signal is weak on daily OHLCV data; the system is best understood as a risk-managed, OOS-gated, momentum-tilted screener, not a forecaster. The clearest measured edge is at the ~40-day position horizon.
+- **Currency.** Sizing and risk figures are expressed in each instrument's own currency without FX conversion.
 
 ## Quick Start
 

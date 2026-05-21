@@ -164,6 +164,62 @@ def test_momentum_small_group_defaults_to_neutral():
     assert all(r["momentum_rank"] == 0.5 for r in rows)
 
 
+# --------------------------- risk-based sizing -------------------------
+
+def test_risk_sizing_equal_risk_for_cash_equity():
+    rows = [{"asset_class": "stock", "currency": "USD", "price": 100.0,
+             "stop_loss_price": 95.0}]
+    scanner.attach_risk_sizing(rows, risk_per_trade=20.0)
+    r = rows[0]
+    assert r["risk_units"] == 4.0          # 20 / (100-95)
+    assert r["risk_notional"] == 400.0
+    assert r["risk_margin"] == 400.0       # leverage 1
+    assert r["risk_max_loss"] == 20.0
+
+
+def test_risk_sizing_cfd_margin_is_leveraged():
+    rows = [{"asset_class": "equity_cfd", "currency": "USD", "price": 100.0,
+             "stop_loss_price": 95.0}]
+    scanner.attach_risk_sizing(rows, risk_per_trade=20.0)
+    r = rows[0]
+    assert r["risk_units"] == 4.0
+    assert r["risk_margin"] == pytest.approx(80.0)   # 400 / 5x
+    assert r["risk_max_loss"] == 20.0
+
+
+def test_risk_sizing_crypto_is_fractional():
+    rows = [{"asset_class": "crypto", "currency": "USD", "price": 100.0,
+             "stop_loss_price": 90.0}]
+    scanner.attach_risk_sizing(rows, risk_per_trade=20.0)
+    r = rows[0]
+    assert r["risk_units"] == pytest.approx(2.0)      # 20 / 10, fractional
+    assert r["risk_max_loss"] == pytest.approx(20.0)
+
+
+def test_risk_sizing_uses_track_specific_stop_key():
+    rows = [{"asset_class": "stock", "currency": "USD", "price": 50.0,
+             "daytrade_stop_loss_price": 48.0}]
+    scanner.attach_risk_sizing(rows, risk_per_trade=10.0)
+    assert rows[0]["risk_units"] == 5.0   # 10 / (50-48)
+
+
+def test_risk_sizing_is_fractional_not_floored():
+    # high-priced instrument: units stay fractional so the risk target is exact
+    rows = [{"asset_class": "index_cfd", "currency": "USD", "price": 30000.0,
+             "stop_loss_price": 29250.0}]  # 750 risk per unit
+    scanner.attach_risk_sizing(rows, risk_per_trade=20.0)
+    r = rows[0]
+    assert r["risk_units"] == pytest.approx(20.0 / 750.0)
+    assert r["risk_max_loss"] == pytest.approx(20.0)   # hits the budget, not floored to 1
+
+
+def test_risk_sizing_skips_invalid():
+    rows = [{"asset_class": "stock", "currency": "USD", "price": 100.0,
+             "stop_loss_price": 105.0}]  # stop above entry
+    scanner.attach_risk_sizing(rows, risk_per_trade=20.0)
+    assert "risk_units" not in rows[0]
+
+
 # ------------------------------ simulate -------------------------------
 
 def _rising_frame(n=260, step=1.0):

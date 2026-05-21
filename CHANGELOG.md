@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-05-21
+
+- Added volatility-targeted position sizing (`attach_risk_sizing`,
+  `RISK_PER_TRADE`): each recommendation shows a suggested size so that hitting
+  the stop-loss costs roughly a fixed risk budget. Because the stop is
+  ATR-derived, volatile names are sized smaller — equal risk per position rather
+  than equal notional. CFD sizes show the leveraged margin; advisory only.
+- Documented the survivorship bias prominently: backtests/OOS use only
+  instruments that exist today, so historical win rates and averages are
+  optimistically biased. Now stated in the run footer and the README.
+- Fixed CI: bare `pytest` could not import the package; added
+  `pyproject.toml` with `pythonpath = ["."]`.
+
 ## 2026-05-19 (performance journal)
 
 - Added a live performance journal ([scanner/journal.py](scanner/journal.py)) that
