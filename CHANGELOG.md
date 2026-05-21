@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-05-19 (performance journal)
+
+- Added a live performance journal ([scanner/journal.py](scanner/journal.py)) that
+  closes the loop on the scanner: every surfaced recommendation is logged to
+  `journal.csv` (deduped per track/ticker/day), then scored against the actual
+  price path that followed — take-profit hit, stop-loss hit, or timed out at the
+  hold horizon (stop assumed first on ambiguous bars). Each scan prints a running
+  track record (win rate, average realized return, TP/SL/time counts, per track).
+- Added `journal_report.py` for a detailed review of realized outcomes and recent
+  closed trades, and unit tests covering logging dedup and TP/SL/TIME scoring.
+
 ## 2026-05-19
 
 - Investigated two prediction-improvement ideas with measurement before

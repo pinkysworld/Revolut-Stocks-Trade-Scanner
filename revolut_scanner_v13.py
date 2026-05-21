@@ -210,6 +210,11 @@ from scanner.reporting import (
     write_text_export,
 )
 from scanner.risk import apply_portfolio_limits
+from scanner.journal import (
+    append_recommendations as journal_append,
+    score_open_entries as journal_score,
+    summarize_journal,
+)
 
 # =================== USER CONFIG ===================
 STOCK_FEE_OPEN_EUR     = 1.0
@@ -261,6 +266,7 @@ DATA_QUALITY_REPORT_CSV = "data_quality_report.csv"
 PORTFOLIO_PLAN_CSV = "portfolio_plan.csv"
 RUN_SUMMARY_JSON = "run_summary.json"
 DASHBOARD_HTML = "dashboard.html"
+JOURNAL_CSV = "journal.csv"
 
 # --- yfinance download cache / concurrency ---
 YF_CACHE_DIR              = os.path.join(os.path.dirname(__file__), ".yf_cache")
@@ -3667,6 +3673,27 @@ def print_position_recommendations(recs):
         print(_kv("40-day backtest", _backtest_value(r['position_bt_trades'], r['position_bt_win_rate'], r['position_bt_avg'])))
         print(_kv("40-day test split", _backtest_value(r['position_test_trades'], r['position_test_win_rate'], r['position_test_avg'])))
 
+def print_journal_summary(rows, n_new=0):
+    """Print the realized track record from the recommendation journal."""
+    s = summarize_journal(rows)
+    print(_section_header("PERFORMANCE JOURNAL — realized outcomes of past recommendations"))
+    if n_new:
+        print(_note(f"Logged {n_new} new recommendation(s) this scan."))
+    if not s["closed"]:
+        print(_empty_note(f"{s['open']} open, none resolved yet — "
+                          f"outcomes will appear here as positions hit TP/SL or time out."))
+        return
+    print(_note(f"{s['total_logged']} logged  ·  {s['open']} open  ·  {s['closed']} closed"))
+    print()
+    ov = s["overall"]
+    print(_kv("Overall", f"win {_winrate(ov['win_rate'])}   "
+              f"{C.GREY}avg{C.RESET} {colorize_pct(ov['avg_realized'], width=0)}   "
+              f"{C.GREY}total{C.RESET} {colorize_pct(ov['total_realized'], width=0)}   "
+              f"{C.GREY}TP/SL/time{C.RESET} {ov['tp']}/{ov['sl']}/{ov['time']}"))
+    for track, st in s["per_track"].items():
+        print(_kv(track, f"{C.BOLD}{st['n']}{C.RESET} closed   win {_winrate(st['win_rate'])}   "
+                  f"avg {colorize_pct(st['avg_realized'], width=0)}"))
+
 def print_stock_week_recommendations(recs):
     print(_section_header(f"STOCK WEEK RECOMMENDATIONS — cash stocks, {STOCK_WEEK_HOLD_DAYS}-day hold, ~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position"))
     if not recs:
@@ -4223,6 +4250,15 @@ def run_scan(iteration=0):
     print_crypto_mean_reversion_recommendations(crypto_mr_recs)
     print_stock_intraday_recommendations(stock_intraday_recs)
     print_crypto_intraday_recommendations(crypto_intraday_recs)
+
+    # ============== PERFORMANCE JOURNAL ==============
+    # Log this scan's recommendations, score any that have now resolved against
+    # the realised price path, and print the running track record.
+    journal_path = os.path.join(OUTDIR, JOURNAL_CSV)
+    journal_now = datetime.now(timezone.utc)
+    n_new = journal_append(journal_path, track_rows, now=journal_now)
+    journal_rows = journal_score(journal_path, lambda t: download_history(t), now=journal_now)
+    print_journal_summary(journal_rows, n_new)
 
     # ============== CSV EXPORTS ==============
     snapshot_dir = run_context["snapshot_dir"]

@@ -39,6 +39,7 @@ paper_trades_intraday.csv
 paper_trades_crypto.csv
 live_state.json
 model_weights.json
+journal.csv
 runs/
 
 # Local diagnostics
