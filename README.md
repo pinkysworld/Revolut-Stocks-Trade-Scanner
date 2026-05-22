@@ -67,7 +67,7 @@ Run the test suite:
 
 ## Configuration
 
-- Use [config/runtime_config.example.json](config/runtime_config.example.json) as the starting point for runtime overrides.
+- Use [config/runtime_config.example.json](config/runtime_config.example.json) as the starting point for runtime overrides. Any module constant can be overridden there, including `RISK_PER_TRADE` (risk budget per trade), `POSITION_HOLD_DAYS`, the `VIX_ELEVATED`/`VIX_HIGH` regime thresholds, and the per-class `CFD_LEVERAGE` map.
 - Use [config/symbol_overrides.example.json](config/symbol_overrides.example.json) to disable or remap unstable symbols without editing the main universe file.
 - CLI flags can override the config file for common controls such as `--one-shot`, `--asset-classes`, `--max-assets`, `--symbol-overrides`, `--portfolio-filter`, and notification settings.
 

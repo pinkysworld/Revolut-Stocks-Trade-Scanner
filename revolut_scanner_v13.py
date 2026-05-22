@@ -1282,7 +1282,7 @@ def _first(rec, *keys):
             return v
     return None
 
-def attach_risk_sizing(rows, risk_per_trade=RISK_PER_TRADE):
+def attach_risk_sizing(rows, risk_per_trade=None):
     """Annotate each rec with a volatility-targeted size from its stop distance.
 
     Sizes the position so that hitting the stop-loss loses ~risk_per_trade in
@@ -1291,6 +1291,8 @@ def attach_risk_sizing(rows, risk_per_trade=RISK_PER_TRADE):
     Cash/CFD equities round to whole units; crypto stays fractional. Advisory —
     leaves the track's own notional/ROI untouched.
     """
+    if risk_per_trade is None:  # read at call time so runtime-config overrides apply
+        risk_per_trade = RISK_PER_TRADE
     for r in rows:
         entry = _first(r, "price")
         stop = _first(r, "stop_loss_price", "daytrade_stop_loss_price",

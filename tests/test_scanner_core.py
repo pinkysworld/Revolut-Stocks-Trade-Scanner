@@ -220,6 +220,17 @@ def test_risk_sizing_skips_invalid():
     assert "risk_units" not in rows[0]
 
 
+def test_risk_sizing_reads_global_at_call_time(monkeypatch):
+    # a runtime-config override of RISK_PER_TRADE must take effect (default-arg
+    # binding used to freeze it at import)
+    monkeypatch.setattr(scanner, "RISK_PER_TRADE", 50.0)
+    rows = [{"asset_class": "stock", "currency": "USD", "price": 100.0,
+             "stop_loss_price": 95.0}]
+    scanner.attach_risk_sizing(rows)  # no explicit budget -> uses the global
+    assert rows[0]["risk_max_loss"] == pytest.approx(50.0)
+    assert rows[0]["risk_units"] == pytest.approx(10.0)  # 50 / 5
+
+
 # ------------------------------ simulate -------------------------------
 
 def _rising_frame(n=260, step=1.0):

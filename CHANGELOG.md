@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-05-21 (config knobs)
+
+- Exposed the new tunables in runtime config (`config/runtime_config.example.json`):
+  `RISK_PER_TRADE`, `POSITION_HOLD_DAYS`, `VIX_ELEVATED`/`VIX_HIGH`, and
+  `CFD_LEVERAGE` — overridable via `--config` without editing source.
+- Fixed a latent bug: `attach_risk_sizing` bound `RISK_PER_TRADE` as a default
+  argument at import, so a config override was silently ignored; it now reads
+  the global at call time.
+
 ## 2026-05-21
 
 - Added volatility-targeted position sizing (`attach_risk_sizing`,
