@@ -271,10 +271,14 @@ JOURNAL_CSV = "journal.csv"
 # --- yfinance download cache / concurrency ---
 YF_CACHE_DIR              = os.path.join(os.path.dirname(__file__), ".yf_cache")
 YF_CACHE_MAX_AGE_MINUTES  = 60
+# Daily bars only change once a day, so once today's history is cached, reuse it
+# for the rest of the day instead of re-downloading hourly. This keeps repeated
+# runs fast and resilient when yfinance is throttling or briefly unreachable.
+YF_DAILY_CACHE_MAX_AGE_MINUTES = 720
 YF_INCREMENTAL_DAILY      = "10d"
 YF_INCREMENTAL_INTRADAY   = "10d"
-YF_DOWNLOAD_TIMEOUT_SEC   = 20
-YF_DOWNLOAD_MAX_WORKERS   = 8
+YF_DOWNLOAD_TIMEOUT_SEC   = 15
+YF_DOWNLOAD_MAX_WORKERS   = 4   # gentler on yfinance — fewer concurrent requests avoids rate-limiting
 YF_DOWNLOAD_RETRIES       = 3       # attempts per ticker before giving up
 YF_DOWNLOAD_BACKOFF_SEC   = 1.5     # base delay; doubled after each failed attempt
 DISABLE_YF_CACHE          = bool(os.environ.get("DISABLE_YF_CACHE"))
@@ -1062,11 +1066,14 @@ def _write_cached_history(path, df):
             print(f"{C.YELLOW}Parquet cache unavailable ({exc}); continuing without disk cache.{C.RESET}")
             _CACHE_WARNING_PRINTED = True
 
-def _cache_is_fresh(path):
+def _cache_is_fresh(path, interval="1d"):
     if not os.path.exists(path):
         return False
     age_sec = time.time() - os.path.getmtime(path)
-    return age_sec <= YF_CACHE_MAX_AGE_MINUTES * 60
+    # Daily bars are stable once written, so reuse them for the rest of the day;
+    # intraday data uses the shorter window.
+    max_age_min = YF_DAILY_CACHE_MAX_AGE_MINUTES if interval == "1d" else YF_CACHE_MAX_AGE_MINUTES
+    return age_sec <= max_age_min * 60
 
 def _yf_download_once(ticker, period, interval):
     kwargs = {
@@ -1107,7 +1114,7 @@ def _raw_yf_download(ticker, period, interval="1d"):
 def download_history(ticker, period=LOOKBACK, interval="1d"):
     path = _safe_cache_name(ticker, period, interval)
     cached = _read_cached_history(path)
-    if cached is not None and _cache_is_fresh(path):
+    if cached is not None and _cache_is_fresh(path, interval):
         return cached.copy()
 
     fetch_period = period
@@ -3996,6 +4003,10 @@ def run_scan(iteration=0):
     if failed:
         print(f"  ({len(failed)} tickers had no usable data and were skipped: "
               f"{', '.join(failed[:8])}{'...' if len(failed) > 8 else ''})")
+        if asset_count and len(failed) >= max(5, asset_count // 3):
+            print(f"  {C.YELLOW}Many downloads failed — yfinance is likely rate-limiting. "
+                  f"Cached histories are reused where available; re-running shortly usually "
+                  f"clears it (daily data is cached for the day).{C.RESET}")
 
     scan_rows.sort(key=lambda x: x["predicted_net_eur"], reverse=True)
     attach_security_identifiers(scan_rows)

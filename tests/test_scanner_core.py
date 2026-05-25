@@ -164,6 +164,28 @@ def test_momentum_small_group_defaults_to_neutral():
     assert all(r["momentum_rank"] == 0.5 for r in rows)
 
 
+# --------------------------- cache freshness ---------------------------
+
+def test_daily_cache_reused_for_the_day(tmp_path):
+    import os, time
+    p = tmp_path / "h.parquet"
+    p.write_text("x")
+    two_hours_ago = time.time() - 2 * 3600
+    os.utime(p, (two_hours_ago, two_hours_ago))
+    # daily data 2h old is still fresh (reused for the day); intraday is not
+    assert scanner._cache_is_fresh(str(p), "1d") is True
+    assert scanner._cache_is_fresh(str(p), "1h") is False
+
+
+def test_daily_cache_expires_after_a_day(tmp_path):
+    import os, time
+    p = tmp_path / "h.parquet"
+    p.write_text("x")
+    thirteen_hours_ago = time.time() - 13 * 3600
+    os.utime(p, (thirteen_hours_ago, thirteen_hours_ago))
+    assert scanner._cache_is_fresh(str(p), "1d") is False
+
+
 # --------------------------- risk-based sizing -------------------------
 
 def test_risk_sizing_equal_risk_for_cash_equity():

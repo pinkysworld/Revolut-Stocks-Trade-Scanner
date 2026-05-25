@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-05-22 (startup robustness)
+
+- Made startup resilient to yfinance throttling, which could leave assets with
+  no loaded history: daily caches are now reused for the rest of the day
+  (`YF_DAILY_CACHE_MAX_AGE_MINUTES`, interval-aware `_cache_is_fresh`) instead
+  of re-downloading hourly, so once a day's data is cached, repeated runs need
+  no network. Lowered concurrent downloads (8 → 4) and the per-request timeout
+  (20s → 15s) to avoid triggering rate limits, and added a clear hint when many
+  downloads fail that yfinance is likely rate-limiting and cached data is being
+  reused.
+
 ## 2026-05-21 (config knobs)
 
 - Exposed the new tunables in runtime config (`config/runtime_config.example.json`):
