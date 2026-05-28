@@ -295,7 +295,7 @@ N_BEST_TRADES  = 15
 N_WORST_TRADES = 10
 
 # --- Recommendations (2-week swing, mixed asset classes) ---
-N_RECOMMENDATIONS  = 5
+N_RECOMMENDATIONS  = 10   # max picks shown per track; fewer shown if fewer qualify
 MIN_SCORE_FOR_REC  = 4   # calibrated; the score barely discriminates for equities
                          # (calibrate_thresholds.py) — the OOS gate and the
                          # momentum tilt do the real filtering.
@@ -314,12 +314,12 @@ MIN_RR_RATIO       = 1.2
 MOMENTUM_TILT_WEIGHT = 0.5    # 0 = pure ROI ranking, 1 = pure momentum ranking
 
 # --- Cash stock swing recommendations ---
-N_STOCK_RECOMMENDATIONS = 5
+N_STOCK_RECOMMENDATIONS = 10
 MIN_STOCK_BT_TRADES     = 10
 STOCK_REQUIRE_OOS       = True
 
 # --- Mixed daytrade ---
-N_DAYTRADE_RECOMMENDATIONS  = 5
+N_DAYTRADE_RECOMMENDATIONS  = 10
 DAYTRADE_SCORE_THRESHOLD    = 5
 DAYTRADE_HOLDS              = [1, 2, 3]
 MIN_DAYTRADE_TRADES         = 20
@@ -327,7 +327,7 @@ MIN_DAYTRADE_TEST_TRADES    = 6
 DAYTRADE_STOP_LOSS_VOL_FRAC = 0.6
 
 # --- Cash stock daytrade ---
-N_STOCK_DAYTRADE_RECOMMENDATIONS = 5
+N_STOCK_DAYTRADE_RECOMMENDATIONS = 10
 STOCK_DAYTRADE_NOTIONAL_EUR      = 1000.0
 STOCK_DAYTRADE_MIN_NOTIONAL      = 250.0
 MIN_STOCK_DAYTRADE_TRADES        = 15
@@ -356,7 +356,7 @@ CRYPTO_MAJOR_OOS_BUCKET = "crypto_major"
 CRYPTO_ALT_OOS_BUCKET   = "crypto_alt"
 
 # --- Crypto WEEKLY (~5 trading-day hold) ---
-N_CRYPTO_WEEKLY_RECOMMENDATIONS = 5
+N_CRYPTO_WEEKLY_RECOMMENDATIONS = 10
 CRYPTO_WEEKLY_HOLD_DAYS         = 5
 CRYPTO_WEEKLY_MIN_PREDICTED_PCT = round(CRYPTO_ROUND_TRIP_FEE_PCT + CRYPTO_WEEKLY_EDGE_BUFFER_PCT, 1)
 MIN_CRYPTO_WEEKLY_BT_TRADES     = 8     # was 12
@@ -379,7 +379,7 @@ CRYPTO_WEEKLY_TRADE_SUGGESTION_COLUMNS = [
 ]
 
 # --- Crypto DAYTRADE (1-3 day hold, daily bars) ---
-N_CRYPTO_DAYTRADE_RECOMMENDATIONS = 5
+N_CRYPTO_DAYTRADE_RECOMMENDATIONS = 10
 CRYPTO_DAYTRADE_HOLDS             = [1, 2, 3]
 CRYPTO_DAYTRADE_SCORE_THRESHOLD   = 4     # was 5
 CRYPTO_DAYTRADE_MIN_PREDICTED_PCT = round(CRYPTO_ROUND_TRIP_FEE_PCT + CRYPTO_DAYTRADE_EDGE_BUFFER_PCT, 1)
@@ -387,7 +387,7 @@ MIN_CRYPTO_DT_TRADES              = 10    # was 15
 MIN_CRYPTO_DT_TEST_TRADES         = 4     # was 5
 
 # --- Crypto INTRADAY (4-24 hour hold, hourly bars) ---
-N_CRYPTO_INTRADAY_RECOMMENDATIONS  = 5
+N_CRYPTO_INTRADAY_RECOMMENDATIONS  = 10
 CRYPTO_INTRADAY_INTERVAL           = "1h"
 CRYPTO_INTRADAY_LOOKBACK           = "730d"
 CRYPTO_INTRADAY_HOLDS              = [4, 8, 12, 24]
@@ -403,7 +403,7 @@ CRYPTO_FILTER_DIAGNOSTIC = True
 INTRADAY_STOP_LOSS_VOL_FRAC = 0.7
 
 # --- Mixed WEEK (5-day hold across all robust asset classes) ---
-N_WEEK_RECOMMENDATIONS = 5
+N_WEEK_RECOMMENDATIONS = 10
 WEEK_HOLD_DAYS         = 5
 WEEK_MIN_SCORE         = 4   # calibrated to the cleaned compute_score range
 
@@ -420,13 +420,13 @@ MIN_POSITION_TEST_TRADES   = 3
 POSITION_RECOMMENDATIONS_CSV = "position_recommendations.csv"
 
 # --- Stock WEEK (cash stocks, ~€1000 sizing, 5-day hold) ---
-N_STOCK_WEEK_RECOMMENDATIONS = 5
+N_STOCK_WEEK_RECOMMENDATIONS = 10
 STOCK_WEEK_HOLD_DAYS         = 5
 MIN_STOCK_WEEK_TRADES        = 10
 MIN_STOCK_WEEK_TEST_TRADES   = 5
 
 # --- Stock INTRADAY (4-24 hour hold on HOURLY bars) ---
-N_STOCK_INTRADAY_RECOMMENDATIONS = 5
+N_STOCK_INTRADAY_RECOMMENDATIONS = 10
 STOCK_INTRADAY_INTERVAL          = "1h"
 STOCK_INTRADAY_LOOKBACK          = "730d"
 STOCK_INTRADAY_HOLDS             = [4, 8, 12, 24]      # in HOURLY bars
@@ -472,7 +472,7 @@ BB_SQUEEZE_RANK_MAX      = 0.20
 BB_SQUEEZE_MIN_VOL_RATIO = 1.25
 
 # --- Crypto mean-reversion bounce track ---
-N_CRYPTO_MEAN_REVERSION_RECOMMENDATIONS = 5
+N_CRYPTO_MEAN_REVERSION_RECOMMENDATIONS = 10
 CRYPTO_MR_HOLDS              = [1, 2, 3, 5]
 CRYPTO_MR_RSI2_MAX           = 5.0
 MIN_CRYPTO_MR_TRADES         = 8
@@ -3756,6 +3756,39 @@ def print_journal_summary(rows, n_new=0):
         print(_kv(track, f"{C.BOLD}{st['n']}{C.RESET} closed   win {_winrate(st['win_rate'])}   "
                   f"avg {colorize_pct(st['avg_realized'], width=0)}"))
 
+
+def _jnum(v, dec=2):
+    try:
+        return f"{float(v):.{dec}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def print_recent_journal(rows, n=20):
+    """List the most recently logged recommendations (open + resolved), newest
+    first, so the recent history stays visible in the console — recommendations
+    no longer 'disappear' once a position resolves or a new scan runs."""
+    if not rows:
+        return
+    recent = sorted(rows, key=lambda r: (str(r.get("date", "")), str(r.get("logged_at", ""))),
+                    reverse=True)[:n]
+    print(_section_header(f"RECENT RECOMMENDATIONS — last {len(recent)} logged (newest first)"))
+    hdr = (f"  {'date':<11}{'track':<16}{'ticker':<13}{'entry':>11}{'TP':>11}{'SL':>11}"
+           f"  {'status':<7}{'outcome':<8}realized")
+    print(f"{C.BOLD}{C.CYAN}{hdr}{C.RESET}")
+    print(f"  {C.GREY}{'─' * 96}{C.RESET}")
+    for r in recent:
+        status = (r.get("status", "") or "")[:7]
+        outcome = (r.get("outcome", "") or "·")[:7]
+        try:
+            realized = colorize_pct(float(r.get("realized_pct")), width=0)
+        except (TypeError, ValueError):
+            realized = f"{C.GREY}open{C.RESET}"
+        print(f"  {str(r.get('date', ''))[:10]:<11}{str(r.get('track', ''))[:15]:<16}"
+              f"{str(r.get('ticker', ''))[:12]:<13}"
+              f"{_jnum(r.get('entry_price'), 4):>11}{_jnum(r.get('take_profit'), 4):>11}"
+              f"{_jnum(r.get('stop_loss'), 4):>11}  {status:<7}{outcome:<8}{realized}")
+
 def print_stock_week_recommendations(recs):
     print(_section_header(f"STOCK WEEK RECOMMENDATIONS — cash stocks, {STOCK_WEEK_HOLD_DAYS}-day hold, ~€{STOCK_DAYTRADE_NOTIONAL_EUR:.0f} per position"))
     if not recs:
@@ -4326,6 +4359,7 @@ def run_scan(iteration=0):
     n_new = journal_append(journal_path, track_rows, now=journal_now)
     journal_rows = journal_score(journal_path, lambda t: download_history(t), now=journal_now)
     print_journal_summary(journal_rows, n_new)
+    print_recent_journal(journal_rows, 20)
 
     # ============== CSV EXPORTS ==============
     snapshot_dir = run_context["snapshot_dir"]

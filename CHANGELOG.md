@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-05-28
+
+- Console now prints a RECENT RECOMMENDATIONS table (last 20 logged from the
+  journal, newest first) so past picks stay visible when scrolling instead of
+  disappearing once a position resolves or a new scan runs.
+- Expanded every track's recommendation list from top 5 to top 10
+  (`N_*_RECOMMENDATIONS`); fewer are shown when fewer qualify.
+
 ## 2026-05-22 (startup robustness)
 
 - Made startup resilient to yfinance throttling, which could leave assets with
